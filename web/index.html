@@ -184,6 +184,10 @@ body{background:var(--bg);color:var(--text);font-family:"Inter","SF Pro Display"
 /* Copy field */
 .copy-field{display:flex;gap:8px;align-items:center;margin:8px 0}
 .copy-field .form-input{flex:1;font-family:SF Mono,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.auth-actions{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-bottom:12px}
+.auth-link-field .form-input{min-width:0}
+.auth-link-field .btn{flex:0 0 36px;width:36px;padding:0;justify-content:center}
+@media(max-width:640px){.auth-actions{grid-template-columns:1fr}.auth-actions .btn{width:100%}}
 
 /* Modal */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.3);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;z-index:50}
@@ -506,7 +510,14 @@ if (response.output_text) {
                 <span class="onb-step-text"><b>Paste and confirm</b><p>Paste it below and click "Confirm and add" to finish authorization</p></span>
               </div>
             </div>
-            <button class="btn primary" onclick="startPKCE()" style="width:100%;margin-bottom:12px;"><i data-lucide="link" style="width:15px;height:15px"></i> Start authorization</button>
+            <div class="auth-actions">
+              <button class="btn primary" onclick="startPKCE()"><i data-lucide="link" style="width:15px;height:15px"></i> Start authorization</button>
+              <button class="btn" id="copyAuthLinkBtn" onclick="copyAuthLink()" title="Copy authorization link"><i data-lucide="copy" style="width:15px;height:15px"></i> Copy authorization link</button>
+            </div>
+            <div class="copy-field auth-link-field" id="authLinkField" style="display:none;margin-top:0;margin-bottom:12px">
+              <input class="form-input" id="authLinkInput" readonly onclick="this.select()" aria-label="Authorization link">
+              <button class="btn btn-sm" onclick="copyAuthLink()" title="Copy authorization link" aria-label="Copy authorization link"><i data-lucide="copy" style="width:14px;height:14px"></i></button>
+            </div>
             <div class="highlight-box warning" style="margin-top:0;margin-bottom:16px">
               <div class="highlight-box-title"><i data-lucide="alert-circle" style="width:14px;height:14px"></i> Important</div>
               <p>After authorization, <strong>ignore the content of the popup page</strong> and copy the full callback URL from the browser address bar, including the <code>code</code> and <code>state</code> parameters.</p>
@@ -765,6 +776,12 @@ const localeText={
   'Paste and confirm':'粘贴并确认',
   'Paste it below and click "Confirm and add" to finish authorization':'粘贴到下方输入框，点击"确认添加"完成授权',
   'Start authorization':'开始授权',
+  'Copy authorization link':'复制授权链接',
+  'Authorization link':'授权链接',
+  'Authorization link ready':'授权链接已生成',
+  'Open this link in another browser, then paste the full callback URL below.':'请在其他浏览器打开此链接，登录后将完整回调地址粘贴到下方。',
+  'Authorization link copied':'授权链接已复制',
+  'Copy failed. Select the link and copy it manually.':'复制失败，请选中链接手动复制。',
   'Important':'重要提示',
   'After authorization,':'授权完成后请',
   'ignore the content of the popup page':'忽略弹出页面的内容',
@@ -1045,12 +1062,17 @@ async function deleteAccount(id){
   catch(e){showNotice(e.message,'error');}
 }
 
-async function startPKCE(){
-  try{
-    const d=await api('/api/auth/start');
-    $('callbackInput').dataset.state=d.state;
-    const popup=window.open(d.url,'pkce','width=600,height=800');
+async function beginPKCE(openPopup){
+  const d=await api('/api/auth/start');
+  $('callbackInput').dataset.state=d.state;
+  $('authLinkInput').value=d.url;
+  $('authLinkField').style.display='flex';
+  const popup=openPopup?window.open(d.url,'pkce','width=600,height=800'):null;
+  if(openPopup&&popup){
     $('authStatus').innerHTML='<div class="highlight-box"><div class="highlight-box-title"><i data-lucide="info" style="width:14px;height:14px"></i>Authorization page opened</div><p>Complete the sign-in in your browser, then paste the full callback URL from the address bar into the field above.</p></div>';
+  }else{
+    $('authStatus').innerHTML='<div class="highlight-box"><div class="highlight-box-title"><i data-lucide="copy" style="width:14px;height:14px"></i>Authorization link ready</div><p>Open this link in another browser, then paste the full callback URL below.</p></div>';
+  }
     $('callbackInput').focus();
     $('callbackInput').placeholder='Paste the full callback URL from the address bar…';
     if(pkceTimer)clearInterval(pkceTimer);
@@ -1063,7 +1085,28 @@ async function startPKCE(){
         if(s.status==='error'||s.status==='expired'){clearInterval(pkceTimer);$('authStatus').innerHTML='<div class="highlight-box warning"><b>Authorization failed or expired</b></div>';}
       }catch(e){}
     },2000);
+  return d;
+}
+
+async function startPKCE(){
+  try{
+    await beginPKCE(true);
   }catch(e){showNotice(e.message,'error');}
+}
+
+async function copyAuthLink(){
+  try{
+    let link=$('authLinkInput').value.trim();
+    if(!link){const d=await beginPKCE(false);link=d.url;}
+    try{
+      await navigator.clipboard.writeText(link);
+    }catch(e){
+      $('authLinkInput').focus();
+      $('authLinkInput').select();
+      if(!document.execCommand('copy'))throw e;
+    }
+    showNotice('Authorization link copied','success');
+  }catch(e){showNotice('Copy failed. Select the link and copy it manually.','error');}
 }
 
 async function submitCallback(){
