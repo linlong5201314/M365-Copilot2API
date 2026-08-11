@@ -27,5 +27,4 @@ ENV M365_LISTEN=0.0.0.0:4141 \
     M365_API_KEYS=/data/api-keys.json \
     M365_ADMIN_PASSWORD_FILE=/data/admin-password \
     M365_ADMIN_PASSWORD_BOOTSTRAP_FILE=/run/secrets/m365_admin_password
-VOLUME ["/data"]
 ENTRYPOINT ["/app/m365-copilot2api"]
