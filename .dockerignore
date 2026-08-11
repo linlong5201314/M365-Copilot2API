@@ -1,0 +1,11 @@
+.git
+.github
+.omx
+.env
+.env.*
+data
+*.log
+*.exe
+m365-copilot2api
+__pycache__
+*.pyc

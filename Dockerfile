@@ -1,17 +1,21 @@
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine3.24 AS build
 
 WORKDIR /src
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
+COPY cmd ./cmd
+COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/m365-copilot2api ./cmd/server
 
-FROM alpine:3.20
-RUN addgroup -S m365 && adduser -S -G m365 m365 \
+FROM alpine:3.24
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S m365 && adduser -S -G m365 m365 \
     && mkdir -p /data /app
 WORKDIR /app
 COPY --from=build /out/m365-copilot2api /app/m365-copilot2api
-COPY --from=build /src/web /app/web
+COPY web /app/web
 RUN chown -R m365:m365 /app /data
 USER m365
 EXPOSE 4141

@@ -6,9 +6,11 @@ import (
 	"log"
 	"m365-copilot2api/internal/outbound"
 	"m365-copilot2api/internal/web"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -24,10 +26,7 @@ func main() {
 	}
 	s.InitM365CloudClient()
 	s.StartAutoCleanup()
-	listen := "127.0.0.1:4141"
-	if v := os.Getenv("M365_LISTEN"); v != "" {
-		listen = v
-	}
+	listen := resolveListenAddress(os.Getenv("PORT"), os.Getenv("M365_LISTEN"))
 	log.Printf("m365-copilot2api listening on http://%s\\n", listen)
 	server := &http.Server{
 		Addr:              listen,
@@ -52,4 +51,14 @@ func main() {
 	}
 	web.StopPersistLoop()
 	log.Println("shutdown complete")
+}
+
+func resolveListenAddress(port, configured string) string {
+	if port = strings.TrimSpace(port); port != "" {
+		return net.JoinHostPort("0.0.0.0", port)
+	}
+	if configured = strings.TrimSpace(configured); configured != "" {
+		return configured
+	}
+	return "127.0.0.1:4141"
 }

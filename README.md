@@ -136,6 +136,31 @@ docker compose up -d --build
 
 镜像内以非 root 用户运行，端口映射默认只暴露在 `127.0.0.1`，数据目录挂载在 `./data`，管理员密码可文件注入。
 
+### Railway 部署
+
+仓库根目录已包含 `railway.json`，会强制 Railway 使用根目录 `Dockerfile`，并用 `/api/health` 做健康检查。按下面步骤部署：
+
+1. 在 Railway 新建 Project，选择 **Deploy from GitHub Repo**，连接本仓库的 `main` 分支。
+2. 确认服务的 **Root Directory** 是仓库根目录（不要填 `web` 或 `cmd`）。推送新提交后 Railway 会自动重新部署。
+3. 在服务的 **Variables** 中添加下面的运行时变量，然后在 **Volumes** 添加持久化卷，挂载路径必须是 `/data`。
+4. 在 **Settings → Networking** 生成 Public Domain。Railway 会自动注入 `PORT`，不要手动填写或固定端口。
+5. 第一次打开 Public Domain：用管理员密码登录，按页面要求修改密码；在「账号」页完成 M365 授权，再在「API Key」页创建调用密钥。
+
+#### Railway 变量
+
+| 变量 | 是否需要 | 值 / 说明 |
+|------|----------|-----------|
+| `M365_ADMIN_PASSWORD` | 强烈建议 | 设置一个至少 6 位的强密码；不要使用 `admin123`。 |
+| `PORT` | 不要手动设置 | Railway 自动注入，服务会监听 `0.0.0.0:$PORT`。 |
+| `M365_DATA_DIR` | 可选 | Docker 默认已经是 `/data`；如修改必须与卷挂载路径一致。 |
+| `M365_PROXY_POOL` | 可选 | 需要代理访问上游时填写，多个地址用逗号或换行分隔。 |
+| `M365_BROWSER_CLIENT_ID` / `M365_BROWSER_REDIRECT_URI` | 可选 | 只有使用自建 Azure 应用和 loopback PKCE 回调时才需要；必须与 Azure 注册值完全一致。 |
+| `GOPROXY` | 仅构建超时才设置 | 若 Build Logs 明确显示 `go mod download` 访问 `proxy.golang.org` 超时，可设为 `https://goproxy.cn,direct` 后重新部署。 |
+
+`M365_CONFIG`、`M365_TOKEN_CACHE`、`M365_SESSION_CACHE`、`M365_API_KEYS` 等路径已由 Dockerfile 指向 `/data`，通常不需要重复设置。不要把真实密码、Token 或 API Key 写入 GitHub。
+
+如果构建失败，先打开 Railway 的 **View Logs → Build Logs**：正常日志应显示检测到根目录 `Dockerfile`。若错误发生在 `go mod download`，再按上表临时设置 `GOPROXY`；若错误发生在启动或健康检查，检查 Public Domain 指向该服务且没有手动覆盖 `PORT`。
+
 ### 初始化与第一次调用
 
 浏览器打开控制台（默认 `http://127.0.0.1:4141`）：
