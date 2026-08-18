@@ -137,6 +137,7 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/admin/deployment/check", s.deploymentCheck)
 	m.HandleFunc("/api/admin/debug/logs", s.debugList)
 	m.HandleFunc("/api/admin/debug/detail", s.debugDetail)
+	m.HandleFunc("/healthz", s.healthz)
 	m.HandleFunc("/api/health", s.health)
 	m.HandleFunc("/api/version", s.version)
 	m.HandleFunc("/api/update", s.update)
@@ -172,8 +173,8 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) adminMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Railway probes health without an administrator session.
-		if r.URL.Path == "/api/admin/login" || r.URL.Path == "/api/admin/session" || r.URL.Path == "/api/admin/change-password" || r.URL.Path == "/api/admin/logout" || r.URL.Path == "/api/health" || r.URL.Path == "/" || r.URL.Path == "/login" {
+		// Login, the console shell, and health probes are intentionally public.
+		if isPublicRoute(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -202,6 +203,15 @@ func (s *Server) adminMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isPublicRoute(path string) bool {
+	switch path {
+	case "/api/admin/login", "/api/admin/session", "/api/admin/change-password", "/api/admin/logout", "/api/health", "/healthz", "/", "/login":
+		return true
+	default:
+		return false
+	}
 }
 
 func secureAdminCookie(r *http.Request) bool {
@@ -390,6 +400,15 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 		"tokenCache":   s.tokens.Path(),
 		"accountCount": len(list),
 	})
+}
+
+// healthz is the minimal unauthenticated probe used by Railway. Keep this
+// endpoint independent of application state so platform health checks remain
+// reliable while the admin console is still being configured.
+func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ok\n")
 }
 
 func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {

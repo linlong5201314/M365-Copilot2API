@@ -138,7 +138,7 @@ docker compose up -d --build
 
 ### Railway 部署
 
-仓库根目录已包含 `railway.json`，会强制 Railway 使用根目录 `Dockerfile`，并用 `/api/health` 做健康检查。按下面步骤部署：
+仓库根目录已包含 `railway.json`，会强制 Railway 使用根目录 `Dockerfile`，并用无需登录的 `/healthz` 做健康检查。旧的 `/api/health` 接口仍保留给兼容调用。按下面步骤部署：
 
 1. 在 Railway 新建 Project，选择 **Deploy from GitHub Repo**，连接本仓库的 `main` 分支。
 2. 确认服务的 **Root Directory** 是仓库根目录（不要填 `web` 或 `cmd`）。推送新提交后 Railway 会自动重新部署。
@@ -417,7 +417,7 @@ curl http://127.0.0.1:4141/v1/messages \
 | `/api/stats` · `/stats/reset` | 缓存命中统计 |
 | `/api/usage` · `/usage/logs` | 用量统计仪表盘与明细 |
 | `/api/chat` · `/chat/stream` | 控制台内即时对话 |
-| `/api/health` · `/api/version` | 健康检查 / 版本 |
+| `/healthz` · `/api/health` · `/api/version` | Railway 探针 / 详细健康检查 / 版本 |
 
 ## 测试
 
