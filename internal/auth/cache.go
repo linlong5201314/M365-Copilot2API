@@ -127,6 +127,13 @@ func (s *Store) List() []AccountToken {
 }
 
 func (s *Store) Upsert(tok TokenSet) (AccountToken, error) {
+	acc, _, err := s.UpsertTracked(tok)
+	return acc, err
+}
+
+// UpsertTracked behaves like Upsert and additionally reports whether the
+// account was newly created or updated an existing entry.
+func (s *Store) UpsertTracked(tok TokenSet) (AccountToken, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := tok.HomeOID
@@ -147,13 +154,18 @@ func (s *Store) Upsert(tok TokenSet) (AccountToken, error) {
 		UpdatedAt:    time.Now(),
 		OID:          firstNonEmpty(tok.HomeOID, id),
 		TID:          tok.TenantID,
-		ClientID:     ClientID(),
+		ClientID:     tok.ClientID,
 	}
 	found := false
 	for i, existing := range s.data.Accounts {
 		if existing.ID == acc.ID || (acc.Email != "" && existing.Email == acc.Email) {
 			if acc.RefreshToken == "" {
 				acc.RefreshToken = existing.RefreshToken
+			}
+			// A refresh without an explicit client id must not reset the
+			// account's existing per-account client.
+			if acc.ClientID == "" {
+				acc.ClientID = existing.ClientID
 			}
 			if acc.TID == "" {
 				acc.TID = existing.TID
@@ -166,10 +178,13 @@ func (s *Store) Upsert(tok TokenSet) (AccountToken, error) {
 			break
 		}
 	}
+	if acc.ClientID == "" {
+		acc.ClientID = ClientID()
+	}
 	if !found {
 		s.data.Accounts = append(s.data.Accounts, acc)
 	}
-	return acc, s.saveLocked()
+	return acc, !found, s.saveLocked()
 }
 
 func (s *Store) Delete(id string) error {

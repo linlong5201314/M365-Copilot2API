@@ -530,10 +530,24 @@ if (response.output_text) {
             <div id="authStatus" style="margin-top:12px"></div>
           </div>
         </div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-head"><span class="card-title">Bulk import accounts</span></div>
+          <div class="card-body">
+            <label class="form-label">Refresh tokens (one per line) or a JSON array with tokens / email+password</label>
+            <textarea class="form-input" id="accountImportInput" rows="5" placeholder="0.ARwAAAAAAAA...&#10;0.ARwAAAAAAAB...&#10;[{&quot;refreshToken&quot;:&quot;0.ARw...&quot;},{&quot;email&quot;:&quot;user@contoso.com&quot;,&quot;password&quot;:&quot;pwd&quot;}]" style="font-family:monospace;font-size:12px"></textarea>
+            <input class="form-input" id="accountImportClientId" style="margin-top:8px" placeholder="Client ID (optional; default gateway client)">
+            <div style="margin-top:12px;display:flex;gap:8px">
+              <button class="btn primary" id="accountImportBtn" onclick="accountImport()"><i data-lucide="users" style="width:14px;height:14px"></i> Import</button>
+            </div>
+            <p class="form-hint" style="margin-top:8px">Password login uses the ROPC grant and only works for accounts without MFA; requires a client ID that allows ROPC (set M365_ROPC_CLIENT_ID)</p>
+            <div id="accountImportStatus" style="margin-top:12px"></div>
+          </div>
+        </div>
         <div class="card">
           <div class="card-head">
             <span class="card-title">Authorized accounts</span>
             <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn btn-sm" onclick="exportAccounts()" title="Export complete login data as JSON"><i data-lucide="download" style="width:14px;height:14px"></i> Export JSON</button>
               <input class="form-input" id="accountSearch" placeholder="Search accounts…" style="width:180px;padding:6px 10px;font-size:12px" oninput="renderAccounts()">
               <div class="seg" id="accountFilter">
                 <button data-f="all" class="active" onclick="setAccountFilter('all')">All</button>
@@ -678,6 +692,24 @@ if (response.output_text) {
     <div class="uke-tabs" id="useKeyClients"></div>
     <div class="uke-tabs" id="useKeyOs"></div>
     <div id="useKeyFiles"></div>
+  </div>
+</div>
+
+<!-- Account JSON Modal -->
+<div class="modal-overlay" id="accountJsonModal">
+  <div class="modal wide">
+    <div class="modal-head">
+      <div>
+        <h3>Account login data (JSON)</h3>
+        <p class="subtitle" id="accountJsonEmail"></p>
+      </div>
+      <button class="modal-close" onclick="closeAccountJSON()"><i data-lucide="x" style="width:15px;height:15px"></i></button>
+    </div>
+    <textarea class="form-input" id="accountJsonBody" readonly rows="16" onclick="this.select()" style="font-family:monospace;font-size:12px;white-space:pre;resize:vertical"></textarea>
+    <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+      <button class="btn btn-sm" onclick="copyAccountJSON()"><i data-lucide="copy" style="width:14px;height:14px"></i> Copy</button>
+      <button class="btn btn-sm" onclick="downloadAccountJSON()"><i data-lucide="download" style="width:14px;height:14px"></i> Download</button>
+    </div>
   </div>
 </div>
 
@@ -861,7 +893,25 @@ const localeText={
   'Not checked':'未检测',
   'Cooling down':'冷却中',
   'Testing…':'测试中…',
-  'Failed':'失败'
+  'Failed':'失败',
+  'Bulk import accounts':'批量导入账号',
+  'Refresh tokens (one per line) or a JSON array with tokens / email+password':'Refresh Token（一行一个）或 JSON 数组（支持 token / 邮箱+密码）',
+  'Client ID (optional; default gateway client)':'Client ID（可选，默认网关客户端）',
+  'Import':'导入',
+  'Importing…':'导入中…',
+  'Imported':'导入成功',
+  'updated':'更新',
+  'failed':'失败',
+  'Enter refresh tokens':'请输入 Refresh Token',
+  'Password login uses the ROPC grant and only works for accounts without MFA; requires a client ID that allows ROPC (set M365_ROPC_CLIENT_ID)':'密码登录使用 ROPC 流程，仅适用于未开启 MFA 的账号；需要允许 ROPC 的客户端 ID（设置 M365_ROPC_CLIENT_ID）',
+  'Export JSON':'导出 JSON',
+  'Export complete login data as JSON':'导出完整登录信息 JSON',
+  'Account login data (JSON)':'账号登录信息（JSON）',
+  'View complete login data (JSON)':'查看完整登录信息（JSON）',
+  'Download':'下载',
+  'Exported':'已导出',
+  'accounts':'个账号',
+  'Copy failed. Select the text and copy it manually.':'复制失败，请选中文本手动复制。'
 };
 let currentLocale='en';
 let localeObserver=null;
@@ -1046,7 +1096,7 @@ function renderAccounts(){
     if(q&&!((x.displayName||'')+' '+(x.email||'')).toLowerCase().includes(q))return false;
     return true;
   });
-  $('accountRows').innerHTML=list.length?list.map(x=>`<tr><td><div class="account-cell"><div class="avatar">${(x.displayName||x.email||'M')[0]}</div><div><b>${x.displayName||x.email}</b><div style="font-size:11px;color:var(--muted)">${x.email||''}</div></div></div></td><td><span class="status ${x.status==='online'?'online':'offline'}"><i></i>${x.status==='online'?'Online':'Offline'}</span></td><td style="font-size:12px;color:var(--muted)">${x.updatedAt?new Date(x.updatedAt).toLocaleString():'-'}</td><td><button class="btn-sm btn danger" onclick="deleteAccount('${x.id}')">Delete</button></td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching accounts</td></tr>';
+  $('accountRows').innerHTML=list.length?list.map(x=>`<tr><td><div class="account-cell"><div class="avatar">${(x.displayName||x.email||'M')[0]}</div><div><b>${x.displayName||x.email}</b><div style="font-size:11px;color:var(--muted)">${x.email||''}</div></div></div></td><td><span class="status ${x.status==='online'?'online':'offline'}"><i></i>${x.status==='online'?'Online':'Offline'}</span></td><td style="font-size:12px;color:var(--muted)">${x.updatedAt?new Date(x.updatedAt).toLocaleString():'-'}</td><td style="white-space:nowrap"><button class="btn-sm btn" onclick="viewAccountJSON('${x.id}')" title="View complete login data (JSON)">JSON</button> <button class="btn-sm btn danger" onclick="deleteAccount('${x.id}')">Delete</button></td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching accounts</td></tr>';
 }
 async function loadAccounts(){
   try{
@@ -1118,6 +1168,73 @@ async function submitCallback(){
     else{u+=raw.replace(/^\?/,'');if(!raw.includes('state='))$('callbackInput').dataset.state&&(u+='&state='+$('callbackInput').dataset.state);}
     await api(u);showNotice('Authorization successful','success');$('callbackInput').value='';loadAccounts();showPage('dashboard');
   }catch(e){showNotice(e.message,'error');}
+}
+
+async function accountImport(){
+  const raw=$('accountImportInput').value.trim();
+  const cid=$('accountImportClientId').value.trim();
+  if(!raw)return showNotice('Enter refresh tokens','error');
+  let body;
+  if(raw.startsWith('[')||raw.startsWith('{')){
+    body=raw;
+  }else{
+    const tokens=raw.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    if(!tokens.length)return showNotice('Enter refresh tokens','error');
+    body=JSON.stringify(tokens.map(rt=>cid?{refreshToken:rt,clientId:cid}:{refreshToken:rt}));
+  }
+  const btn=$('accountImportBtn');
+  btn.disabled=true;btn.textContent='Importing…';
+  $('accountImportStatus').innerHTML='';
+  try{
+    const d=await api('/api/accounts/import',{method:'POST',body});
+    let msg=translateText('Imported')+' '+d.imported+', '+translateText('updated')+' '+d.updated;
+    if(d.failed&&d.failed.length)msg+='; '+translateText('failed')+' '+d.failed.length;
+    showNotice(msg,d.failed&&d.failed.length?'error':'success');
+    if(d.failed&&d.failed.length){
+      $('accountImportStatus').innerHTML='<div class="highlight-box warning">'+d.failed.map(f=>`<p style="margin:4px 0">#${f.index+1} ${f.token||f.email}: ${f.error}</p>`).join('')+'</div>';
+    }
+    if(d.imported||d.updated){$('accountImportInput').value='';loadAccounts();}
+  }catch(e){showNotice(e.message,'error');}
+  finally{btn.disabled=false;btn.textContent='Import';}
+}
+
+// ===== Account login data export =====
+async function exportAccounts(){
+  try{
+    const d=await api('/api/accounts/export');
+    const payload=JSON.stringify({exportedAt:d.exportedAt,accounts:d.accounts},null,2);
+    downloadText('accounts-export-'+new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)+'.json',payload,'application/json');
+    showNotice(translateText('Exported')+' '+(d.count||0)+' '+translateText('accounts'),'success');
+  }catch(e){showNotice(e.message,'error');}
+}
+
+let currentAccountJSON='',currentAccountName='';
+async function viewAccountJSON(id){
+  try{
+    const d=await api('/api/accounts/export?ids='+encodeURIComponent(id));
+    const acc=(d.accounts||[])[0];
+    if(!acc)return showNotice('No matching accounts','error');
+    currentAccountJSON=JSON.stringify(acc,null,2);
+    currentAccountName=(acc.email||acc.displayName||acc.id).replace(/[^a-zA-Z0-9@._-]+/g,'_');
+    $('accountJsonEmail').textContent=acc.email||acc.displayName||acc.id;
+    $('accountJsonBody').value=currentAccountJSON;
+    $('accountJsonModal').classList.add('open');
+  }catch(e){showNotice(e.message,'error');}
+}
+function closeAccountJSON(){$('accountJsonModal').classList.remove('open');}
+async function copyAccountJSON(){
+  try{await navigator.clipboard.writeText(currentAccountJSON);showNotice('Copied','success');}catch(e){showNotice('Copy failed. Select the text and copy it manually.','error');}
+}
+function downloadAccountJSON(){
+  if(!currentAccountJSON)return;
+  downloadText('account-'+currentAccountName+'.json',currentAccountJSON,'application/json');
+}
+function downloadText(filename,text,mime){
+  const blob=new Blob([text],{type:mime+';charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=filename;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},500);
 }
 
 async function loadKeys(){

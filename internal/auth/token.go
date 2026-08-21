@@ -24,6 +24,9 @@ type TokenSet struct {
 	DisplayName  string    `json:"display_name,omitempty"`
 	HomeOID      string    `json:"home_oid,omitempty"`
 	TenantID     string    `json:"tenant_id,omitempty"`
+	// ClientID records which OAuth client redeemed the tokens so bulk imports
+	// can preserve per-account client ids; never serialized.
+	ClientID string `json:"-"`
 }
 
 type tokenResponse struct {
@@ -70,16 +73,29 @@ func ExchangeCode(code, verifier, redirect string) (TokenSet, error) {
 	form.Set("redirect_uri", redirect)
 	form.Set("code_verifier", verifier)
 	form.Set("scope", Scope())
-	return requestToken(form)
+	set, err := requestToken(form)
+	set.ClientID = ClientID()
+	return set, err
 }
 
 func Refresh(refreshToken string) (TokenSet, error) {
+	return RefreshWithClient(refreshToken, ClientID())
+}
+
+// RefreshWithClient redeems a refresh token with an explicit client id, used
+// by bulk account imports where each account may belong to a different client.
+func RefreshWithClient(refreshToken, clientID string) (TokenSet, error) {
+	if strings.TrimSpace(clientID) == "" {
+		clientID = ClientID()
+	}
 	form := url.Values{}
-	form.Set("client_id", ClientID())
+	form.Set("client_id", clientID)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("scope", Scope())
-	return requestToken(form)
+	set, err := requestToken(form)
+	set.ClientID = clientID
+	return set, err
 }
 
 func requestToken(form url.Values) (TokenSet, error) {

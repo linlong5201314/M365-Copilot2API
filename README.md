@@ -62,6 +62,8 @@ M365 Copilot2API 是一个用 Go 编写的自托管网关，把微软 365 Copilo
 | 会话显式绑定 | `X-M365-Session-Id` 请求头精确指定要继续的会话 |
 | 自动清理 | 按闲置时间（默认 2h）或保留数量回收云端对话 |
 | 多账号管理 | PKCE 授权 + 账号轮询 + 故障自动转移 |
+| 批量导入账号 | 控制台粘贴多个 Refresh Token 或邮箱+密码（ROPC，需未开 MFA 的账号与允许 ROPC 的客户端 ID），一行一个或 JSON 数组，后端逐条换取令牌入库，返回逐条结果 |
+| 账号登录信息导出 | 控制台一键导出全部账号的完整登录信息 JSON（含 Refresh Token 等），可配合批量导入做迁移，或供外部场景使用；单账号也支持查看 / 复制 JSON |
 | API Key 管理 | 控制台创建 / 撤销 / 回读 |
 | 代理池 | HTTP / HTTPS / SOCKS5 代理轮换、健康检查、失败冷却 |
 | 用量统计 | 按 key / 账号 / 模型 / 端点聚合（`usage.jsonl`） |
@@ -412,6 +414,8 @@ curl http://127.0.0.1:4141/v1/messages \
 | `/api/admin/settings` | 运行时设置查看与修改 |
 | `/api/admin/proxy-pool` | 代理池管理 |
 | `/api/accounts` · `/refresh` · `/delete` | 账号管理 |
+| `/api/accounts/import` | 批量导入账号（Refresh Token / 邮箱+密码） |
+| `/api/accounts/export` | 导出账号完整登录信息 JSON（含 Refresh Token，可用 `?ids=` 过滤） |
 | `/api/auth/start` · `status` · `callback` | PKCE 授权流程 |
 | `/api/conversations` · `/api/m365/conversations` | 本地 / 云端对话列表、删除、清理、白名单 |
 | `/api/stats` · `/stats/reset` | 缓存命中统计 |
