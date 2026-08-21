@@ -66,13 +66,18 @@ func TestImportAccountsBatch(t *testing.T) {
 	res := s.importAccountsBatch([]accountImportEntry{
 		{RefreshToken: "good-a", ClientID: "cid-a"},
 		{RefreshToken: "bad"},
-		{RefreshToken: "good-a-again"},
 	}, login)
-	if res.Total != 3 || res.Imported != 1 || res.Updated != 1 || len(res.Failed) != 1 {
-		t.Fatalf("res=%#v", res)
+	if res.Total != 2 || res.Imported != 1 || res.Updated != 0 || len(res.Failed) != 1 {
+		t.Fatalf("first batch res=%#v", res)
 	}
 	if res.Failed[0].Index != 1 || res.Failed[0].Token != "..." || !strings.Contains(res.Failed[0].Error, "invalid_grant") {
 		t.Fatalf("failed entry=%#v", res.Failed)
+	}
+	// Re-importing the same account in a separate batch is a deterministic
+	// update (avoids the concurrent-worker ordering race from a single batch).
+	res = s.importAccountsBatch([]accountImportEntry{{RefreshToken: "good-a-again"}}, login)
+	if res.Total != 1 || res.Imported != 0 || res.Updated != 1 || len(res.Failed) != 0 {
+		t.Fatalf("second batch res=%#v", res)
 	}
 	acc, ok := s.tokens.Get("a@example.com")
 	if !ok {
@@ -179,5 +184,79 @@ func TestAccountImportUIExposesControls(t *testing.T) {
 		if !strings.Contains(b, marker) {
 			t.Errorf("web UI is missing marker %q", marker)
 		}
+	}
+}
+
+func TestParseAccountImportAcceptsExportJSON(t *testing.T) {
+	raw := `{"exportedAt":"2026-08-21T00:00:00Z","count":2,"accounts":[{"id":"oid-a","email":"a@example.com","displayName":"Alice","status":"online","oid":"oid-a","tid":"tid-1","clientId":"cid-a","accessToken":"at-a","refreshToken":"rt-a"},{"id":"oid-b","email":"b@example.com","oid":"oid-b","tid":"tid-2","clientId":"cid-b","accessToken":"at-b","refreshToken":"rt-b"}]}`
+	entries, err := parseAccountImport(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries=%d, want 2", len(entries))
+	}
+	e := entries[0]
+	if e.RefreshToken != "rt-a" || e.OID != "oid-a" || e.TID != "tid-1" || e.ClientID != "cid-a" || e.AccessToken != "at-a" || e.Email != "a@example.com" || e.DisplayName != "Alice" {
+		t.Fatalf("entry=%#v", e)
+	}
+}
+
+func TestDefaultAccountLoginDirectImport(t *testing.T) {
+	set, err := defaultAccountLogin(accountImportEntry{
+		RefreshToken: "rt", AccessToken: "at", Email: "a@example.com", DisplayName: "Alice",
+		OID: "oid-a", TID: "tid-1", ClientID: "cid-a", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.RefreshToken != "rt" || set.AccessToken != "at" || set.HomeOID != "oid-a" || set.TenantID != "tid-1" || set.ClientID != "cid-a" || set.Email != "a@example.com" {
+		t.Fatalf("set=%#v", set)
+	}
+}
+
+func TestExportThenReimportRoundTrip(t *testing.T) {
+	src, err := auth.OpenStore(filepath.Join(t.TempDir(), "src.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcSrv := &Server{tokens: src}
+	if _, err := src.Upsert(auth.TokenSet{
+		AccessToken: "at-a", RefreshToken: "rt-a", Email: "a@example.com",
+		DisplayName: "Alice", HomeOID: "oid-a", TenantID: "tid-1", ClientID: "cid-a",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	srcSrv.exportAccounts(rr, httptest.NewRequest(http.MethodGet, "/api/accounts/export", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	entries, err := parseAccountImport(rr.Body.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries=%d, want 1", len(entries))
+	}
+
+	dst, err := auth.OpenStore(filepath.Join(t.TempDir(), "dst.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dstSrv := &Server{tokens: dst}
+	res := dstSrv.importAccountsBatch(entries, defaultAccountLogin)
+	if res.Total != 1 || res.Imported != 1 || len(res.Failed) != 0 {
+		t.Fatalf("import res=%#v", res)
+	}
+	acc, ok := dst.Get("oid-a")
+	if !ok {
+		t.Fatal("round-trip account missing")
+	}
+	if acc.Email != "a@example.com" || acc.RefreshToken != "rt-a" || acc.ClientID != "cid-a" || acc.TID != "tid-1" || acc.OID != "oid-a" {
+		t.Fatalf("account=%#v", acc)
 	}
 }

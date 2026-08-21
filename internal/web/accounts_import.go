@@ -19,13 +19,21 @@ const (
 	accountImportTimeout  = 25 * time.Second
 )
 
-// accountImportEntry is one account to import: either a refresh token or an
-// email/password pair (ROPC login), plus an optional per-account OAuth client id.
+// accountImportEntry is one account to import: a refresh token, an
+// email/password pair (ROPC login), or a complete exported account record
+// (see /api/accounts/export), plus an optional per-account OAuth client id.
 type accountImportEntry struct {
 	RefreshToken string `json:"refreshToken"`
 	Email        string `json:"email,omitempty"`
 	Password     string `json:"password,omitempty"`
 	ClientID     string `json:"clientId,omitempty"`
+	// Fields carried by an exported account; a full record is persisted
+	// directly without re-redeeming tokens.
+	AccessToken string    `json:"accessToken,omitempty"`
+	DisplayName string    `json:"displayName,omitempty"`
+	OID         string    `json:"oid,omitempty"`
+	TID         string    `json:"tid,omitempty"`
+	ExpiresAt   time.Time `json:"expiresAt,omitempty"`
 }
 
 type accountImportFailure struct {
@@ -64,10 +72,23 @@ func (s *Server) importAccounts(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, s.importAccountsBatch(entries, defaultAccountLogin))
 }
 
-// defaultAccountLogin redeems an entry at the Microsoft token endpoint:
-// email/password pairs use the ROPC grant, everything else uses the refresh
-// token grant.
+// defaultAccountLogin turns an entry into a TokenSet. A complete exported
+// record (refresh token plus identity fields) is persisted directly with no
+// OAuth round-trip, so exported JSON re-imports cleanly. Email/password pairs
+// use the ROPC grant; bare refresh tokens use the refresh token grant.
 func defaultAccountLogin(entry accountImportEntry) (auth.TokenSet, error) {
+	if entry.RefreshToken != "" && (entry.OID != "" || entry.AccessToken != "") {
+		return auth.TokenSet{
+			AccessToken:  entry.AccessToken,
+			RefreshToken: entry.RefreshToken,
+			Email:        entry.Email,
+			DisplayName:  entry.DisplayName,
+			HomeOID:      entry.OID,
+			TenantID:     entry.TID,
+			ClientID:     entry.ClientID,
+			ExpiresAt:    entry.ExpiresAt,
+		}, nil
+	}
 	if entry.Email != "" && entry.Password != "" {
 		return auth.LoginWithPassword(entry.Email, entry.Password, entry.ClientID)
 	}
@@ -75,8 +96,9 @@ func defaultAccountLogin(entry accountImportEntry) (auth.TokenSet, error) {
 }
 
 // parseAccountImport accepts a JSON array of {refreshToken, clientId} entries,
-// a JSON object {"tokens":[...]}, or a plain-text blob with one refresh token
-// per line.
+// a JSON object {"tokens":[...]} or {"accounts":[...]} (the latter is the
+// export format and re-imports directly), or a plain-text blob with one
+// refresh token per line.
 func parseAccountImport(raw string) ([]accountImportEntry, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -89,12 +111,16 @@ func parseAccountImport(raw string) ([]accountImportEntry, error) {
 		}
 	} else if strings.HasPrefix(trimmed, "{") {
 		var obj struct {
-			Tokens []accountImportEntry `json:"tokens"`
+			Tokens   []accountImportEntry `json:"tokens"`
+			Accounts []accountImportEntry `json:"accounts"`
 		}
-		if err := json.Unmarshal([]byte(trimmed), &obj); err != nil || len(obj.Tokens) == 0 {
-			return nil, fmt.Errorf("invalid JSON object: expected {tokens:[...]}")
+		if err := json.Unmarshal([]byte(trimmed), &obj); err != nil || (len(obj.Tokens) == 0 && len(obj.Accounts) == 0) {
+			return nil, fmt.Errorf("invalid JSON object: expected {tokens:[...]} or {accounts:[...]}")
 		}
 		entries = obj.Tokens
+		if len(entries) == 0 {
+			entries = obj.Accounts
+		}
 	} else {
 		for _, line := range strings.Split(trimmed, "\n") {
 			line = strings.TrimSpace(line)
@@ -109,7 +135,11 @@ func parseAccountImport(raw string) ([]accountImportEntry, error) {
 		e.Email = strings.TrimSpace(e.Email)
 		e.Password = strings.TrimSpace(e.Password)
 		e.ClientID = strings.TrimSpace(e.ClientID)
-		if e.RefreshToken == "" && (e.Email == "" || e.Password == "") {
+		e.AccessToken = strings.TrimSpace(e.AccessToken)
+		e.DisplayName = strings.TrimSpace(e.DisplayName)
+		e.OID = strings.TrimSpace(e.OID)
+		e.TID = strings.TrimSpace(e.TID)
+		if e.RefreshToken == "" && (e.Email == "" || e.Password == "") && e.OID == "" {
 			continue
 		}
 		out = append(out, e)

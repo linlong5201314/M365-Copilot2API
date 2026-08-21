@@ -540,6 +540,7 @@ if (response.output_text) {
               <button class="btn primary" id="accountImportBtn" onclick="accountImport()"><i data-lucide="users" style="width:14px;height:14px"></i> Import</button>
             </div>
             <p class="form-hint" style="margin-top:8px">Password login uses the ROPC grant and only works for accounts without MFA; requires a client ID that allows ROPC (set M365_ROPC_CLIENT_ID)</p>
+            <p class="form-hint">You can also paste an exported account JSON ({"accounts":[...]}) to import those accounts directly without re-authorizing.</p>
             <div id="accountImportStatus" style="margin-top:12px"></div>
           </div>
         </div>
@@ -904,6 +905,7 @@ const localeText={
   'failed':'失败',
   'Enter refresh tokens':'请输入 Refresh Token',
   'Password login uses the ROPC grant and only works for accounts without MFA; requires a client ID that allows ROPC (set M365_ROPC_CLIENT_ID)':'密码登录使用 ROPC 流程，仅适用于未开启 MFA 的账号；需要允许 ROPC 的客户端 ID（设置 M365_ROPC_CLIENT_ID）',
+  'You can also paste an exported account JSON ({"accounts":[...]}) to import those accounts directly without re-authorizing.':'也可以直接粘贴导出的账号 JSON（{"accounts":[...]}），无需重新授权即可导入这些账号。',
   'Export JSON':'导出 JSON',
   'Export complete login data as JSON':'导出完整登录信息 JSON',
   'Account login data (JSON)':'账号登录信息（JSON）',
