@@ -52,6 +52,10 @@ type Request struct {
 	Tools          []Tool
 	ToolChoice     any
 	MCPServerURL   string // URL of the MCP HTTP SSE server for tool discovery
+	// AgentGptID attaches a published Copilot Studio declarative agent via
+	// threadLevelGptId.gpts. Upstream forces the tone to GPT-5 while an
+	// agent is attached, so callers set it only on tool-bearing answer turns.
+	AgentGptID string
 	// Started is true only for the first turn of a ChatHub conversation.
 	Started bool
 }
@@ -71,6 +75,41 @@ type StreamEvent struct {
 
 type StreamHandler func(StreamEvent) error
 
+// ThrottleError marks an upstream throttling outcome that ChatHub delivers
+// out-of-band (type 3 error frame or result.value) instead of as an HTTP
+// status. The web layer maps it to rate_limit through errors.As instead of
+// string-matching free-form error text.
+type ThrottleError struct {
+	Value string
+}
+
+func (e *ThrottleError) Error() string {
+	return "upstream throttled: " + e.Value
+}
+
+// throttleSignal reports whether a ChatHub error message or result value
+// indicates the account is being rate limited or throttled.
+func throttleSignal(v string) bool {
+	if v == "" {
+		return false
+	}
+	lv := strings.ToLower(v)
+	return strings.Contains(lv, "throttl") ||
+		strings.Contains(lv, "too many requests") ||
+		strings.Contains(lv, "429")
+}
+
+// DisengagedError marks ChatHub's Disengaged gate: upstream suppressed the
+// turn and produced no usable output. Retrying immediately usually makes it
+// worse; the web layer applies a longer cooldown than for rate limits.
+type DisengagedError struct {
+	Message string
+}
+
+func (e *DisengagedError) Error() string {
+	return "upstream disengaged: " + e.Message
+}
+
 type Result struct {
 	Text           string
 	Reasoning      string
@@ -79,15 +118,22 @@ type Result struct {
 	RequestID      string
 	Throttling     any
 	RawResult      string
-	Events         []json.RawMessage
-	Normalized     []Event
-	Images         []string
+	// ContentOrigin is the last contentOrigin seen on bot text (e.g. DeepLeo
+	// for real answers, BotConnection for canned filler). The model tester
+	// uses it to tell a live tone from a registered-but-dead one.
+	ContentOrigin string
+	Events        []json.RawMessage
+	Normalized    []Event
+	Images        []string
 }
 
 type Client struct {
 	HTTPHeader http.Header
 	HTTPClient *http.Client
 	Dialer     *websocket.Dialer
+	// WSBase overrides the ChatHub WebSocket origin; tests point this at a
+	// fake SignalR server.
+	WSBase string
 	// Trace receives attachment-only metadata; URL contents are never exposed.
 	Trace func(map[string]any)
 }
@@ -128,20 +174,34 @@ func (c *Client) ChatWithDelta(ctx context.Context, acc Account, req Request, on
 	return c.chatWithHandlers(ctx, acc, req, onDelta, nil)
 }
 
-// ChatWithReasoning is the streaming entry point used by the OpenAI-compatible
-// layer. onDelta receives answer text tokens, onReasoning receives the
-// multi-step ChainOfThought transcript that ChatHub marks with
-// contentOrigin=ChainOfThoughtSummary / addToChainOfThought=true.
-func (c *Client) ChatWithReasoning(ctx context.Context, acc Account, req Request, onDelta func(string) error, onReasoning func(string) error) (Result, error) {
-	return c.chatWithHandlers(ctx, acc, req, onDelta, func(ev StreamEvent) error {
-		if ev.Kind == "reasoning" && ev.Text != "" && onReasoning != nil {
-			return onReasoning(ev.Text)
-		}
-		return nil
-	})
+func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request, onDelta func(string) error, onEvent StreamHandler) (Result, error) {
+	return c.chatWithHandlersConn(ctx, acc, req, onDelta, onEvent, nil)
 }
 
-func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request, onDelta func(string) error, onEvent StreamHandler) (Result, error) {
+// ChatPreconn runs a complete chat invocation on a connection returned by
+// Preconnect, skipping the dial and handshake entirely. acc is only a
+// fallback when pre is nil.
+func (c *Client) ChatPreconn(ctx context.Context, acc Account, pre *Preconn, req Request) (Result, error) {
+	if pre != nil {
+		acc = pre.acc
+	}
+	return c.chatWithHandlersConn(ctx, acc, req, nil, nil, pre)
+}
+
+// ChatWithEventsPreconn is ChatWithEvents on a pre-connected socket.
+func (c *Client) ChatWithEventsPreconn(ctx context.Context, acc Account, pre *Preconn, req Request, handler StreamHandler) (Result, error) {
+	if pre != nil {
+		acc = pre.acc
+	}
+	return c.chatWithHandlersConn(ctx, acc, req, func(text string) error {
+		if handler == nil {
+			return nil
+		}
+		return handler(StreamEvent{Kind: "text", Text: text})
+	}, handler, pre)
+}
+
+func (c *Client) chatWithHandlersConn(ctx context.Context, acc Account, req Request, onDelta func(string) error, onEvent StreamHandler, pre *Preconn) (Result, error) {
 	startedAt := time.Now()
 	log.Printf("chathub timing start prompt_len=%d", len(req.Text))
 	if acc.AccessToken == "" || acc.OID == "" || acc.TID == "" {
@@ -154,43 +214,63 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		req.Tone = defaultTone
 	}
 	firstTurn := req.Started
-	if req.SessionID == "" {
-		req.SessionID = uuid.NewString()
-		firstTurn = true
-	}
-	if req.ConversationID == "" {
-		req.ConversationID = uuid.NewString()
-		firstTurn = true
-	}
-	requestID := uuid.NewString()
-	if err := c.uploadAttachments(ctx, acc, req.ConversationID, req.Attachments); err != nil {
-		return Result{}, fmt.Errorf("upload attachment: %w", err)
-	}
+	var conn *websocket.Conn
+	var requestID string
+	if pre != nil {
+		// A pre-connected socket already carries the conversation identifiers
+		// in its URL; the chat frame must echo exactly those.
+		conn = pre.conn
+		req.ConversationID = pre.conversationID
+		req.SessionID = pre.sessionID
+		requestID = pre.requestID
+	} else {
+		if req.SessionID == "" {
+			req.SessionID = uuid.NewString()
+			firstTurn = true
+		}
+		if req.ConversationID == "" {
+			req.ConversationID = uuid.NewString()
+			firstTurn = true
+		}
+		requestID = uuid.NewString()
+		if err := c.uploadAttachments(ctx, acc, req.ConversationID, req.Attachments); err != nil {
+			return Result{}, fmt.Errorf("upload attachment: %w", err)
+		}
 
-	wsURL, err := buildWSURL(acc, req.SessionID, req.ConversationID, requestID)
-	if err != nil {
-		return Result{}, err
-	}
+		wsURL, err := c.buildWSURL(acc, req.SessionID, req.ConversationID, requestID)
+		if err != nil {
+			return Result{}, err
+		}
 
-	dialStarted := time.Now()
-	conn, _, err := c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
-	log.Printf("chathub timing ws_dial_ms=%d total_ms=%d", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds())
-	if err != nil {
-		return Result{}, fmt.Errorf("ws dial: %w", err)
+		dialStarted := time.Now()
+		var dialErr error
+		conn, _, dialErr = c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
+		log.Printf("chathub timing ws_dial_ms=%d total_ms=%d", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds())
+		if dialErr != nil {
+			return Result{}, fmt.Errorf("ws dial: %w", dialErr)
+		}
+		if err := signalRHandshake(conn); err != nil {
+			_ = conn.Close()
+			return Result{}, err
+		}
 	}
 	defer conn.Close()
 
-	_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
-	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
-
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"protocol":"json","version":1}`+rs)); err != nil {
-		return Result{}, fmt.Errorf("handshake send: %w", err)
+	// stopGeneration asks ChatHub to abort the in-flight invocation (same
+	// invocationId "0" as the chat frame). Sent when the caller gives up —
+	// client disconnect, request deadline, or handler error — so the upstream
+	// turn stops consuming the account's per-conversation message quota.
+	stopGeneration := func() {
+		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":1,"target":"stop","invocationId":"0"}`+rs))
 	}
-	if _, _, err := conn.ReadMessage(); err != nil {
-		return Result{}, fmt.Errorf("handshake recv: %w", err)
+	// abort funnels every give-up path through the stop frame.
+	abort := func(err error) (Result, error) {
+		stopGeneration()
+		return Result{}, err
 	}
 
-	payload := chatPayload(req.Text, req.SessionID, req.ConversationID, requestID, req.Tone, firstTurn, req.Attachments, req.Tools, req.ToolChoice, req.MCPServerURL)
+	payload := chatPayload(req.Text, req.SessionID, req.ConversationID, requestID, req.Tone, firstTurn, req.Attachments, req.Tools, req.ToolChoice, req.MCPServerURL, req.AgentGptID)
 	log.Printf("chathub prompt-trace text=%d tools=%d payload=%d", len(req.Text), len(req.Tools), len(payload))
 	if c.Trace != nil {
 		meta := map[string]any{"stage": "chathub_payload", "attachment_count": len(req.Attachments), "payload_has_attachments": strings.Contains(payload, `"attachments"`), "attachments": []map[string]any{}}
@@ -199,8 +279,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 		c.Trace(meta)
 	}
-	log.Printf("chathub timing handshake_ms=%d", time.Since(dialStarted).Milliseconds())
+	log.Printf("chathub timing handshake_ms=%d", time.Since(startedAt).Milliseconds())
 	payloadSentAt := time.Now()
+	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
 		return Result{}, fmt.Errorf("chat send: %w", err)
 	}
@@ -250,6 +331,8 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	var events []json.RawMessage
 	seenStreamTools := map[string]bool{}
 	var reasoningBuf strings.Builder
+	disengagedSeen := false
+	var lastContentOrigin string
 
 	deadline := time.Now().Add(5 * time.Minute)
 	type wsRead struct {
@@ -267,7 +350,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		var read wsRead
 		select {
 		case <-ctx.Done():
-			return Result{}, ctx.Err()
+			return abort(ctx.Err())
 		case read = <-readCh:
 		}
 		if read.err != nil {
@@ -305,7 +388,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 					if onEvent != nil {
 						for _, ev := range extractToolEvents(arg, seenStreamTools) {
 							if err := onEvent(ev); err != nil {
-								return Result{}, err
+								return abort(err)
 							}
 						}
 					}
@@ -314,12 +397,15 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 						if ev.Kind == "reasoning" {
 							reasoningBuf.WriteString(ev.Text)
 						}
+						if ev.Kind == "disengaged" {
+							disengagedSeen = true
+						}
 						ev.Raw = eventRaw(arg)
 						// SearchResults frames carry live citations; surface them to
 						// handlers even though they are classified as text.
 						if (ev.Kind != "text" || ev.ContentType == "SearchResults") && onEvent != nil {
 							if err := onEvent(ev); err != nil {
-								return Result{}, err
+								return abort(err)
 							}
 						}
 					}
@@ -334,7 +420,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 					}
 					if w, ok := arg["writeAtCursor"].(string); ok && w != "" && !toolFrame {
 						if err := emitSnapshot(w); err != nil {
-							return Result{}, err
+							return abort(err)
 						}
 					}
 					if thr, ok := arg["throttling"]; ok {
@@ -346,14 +432,17 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 							if !ok {
 								continue
 							}
-							author, _ := m["author"].(string)
-							text, _ := m["text"].(string)
-							mt, _ := m["messageType"].(string)
-							if author == "bot" && mt == "" && text != "" {
+					author, _ := m["author"].(string)
+						text, _ := m["text"].(string)
+						mt, _ := m["messageType"].(string)
+						if origin, ok := m["contentOrigin"].(string); ok && origin != "" {
+							lastContentOrigin = origin
+						}
+						if author == "bot" && mt == "" && text != "" {
 								// ChatHub often sends the first visible text as a full snapshot,
 								// followed by cursor deltas. Emit only the unseen suffix.
 								if err := emitSnapshot(text); err != nil {
-									return Result{}, err
+									return abort(err)
 								}
 							}
 						}
@@ -373,16 +462,37 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 						if msg, ok := res["message"].(string); ok {
 							final = msg
 						}
+						// A throttled result frame means nothing useful follows;
+						// fail fast with a structured error instead of waiting
+						// for the completion frame.
+						if throttleSignal(rawResult) {
+							return Result{}, &ThrottleError{Value: rawResult}
+						}
 					}
 				}
 				// completion frame often follows; keep reading a bit but we already have content
 				continue
 			}
 
-			if int(t) == 3 {
-				if errObj, ok := obj["error"].(map[string]any); ok {
-					return Result{}, fmt.Errorf("chathub completion error: %v", errObj)
-				}
+				if int(t) == 3 {
+					if errObj, ok := obj["error"].(map[string]any); ok {
+						msg, _ := errObj["message"].(string)
+						if msg == "" {
+							if b, merr := json.Marshal(errObj); merr == nil {
+								msg = string(b)
+							}
+						}
+						if throttleSignal(msg) {
+							return Result{}, &ThrottleError{Value: msg}
+						}
+						return Result{}, fmt.Errorf("chathub completion error: %v", errObj)
+					}
+					// A disengaged turn with no streamed text and no final
+					// message carries nothing usable; surface it as a
+					// structured failure rather than an empty success.
+					if disengagedSeen && streamed.Len() == 0 && strings.TrimSpace(final) == "" {
+						return Result{}, &DisengagedError{Message: "no content produced"}
+					}
 				// end of stream
 				log.Printf("chathub timing completion_frame_ms=%d streamed_text=%d events=%d", time.Since(payloadSentAt).Milliseconds(), streamed.Len(), len(events))
 				text := final
@@ -397,6 +507,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 					RequestID:      requestID,
 					Throttling:     throttling,
 					RawResult:      rawResult,
+					ContentOrigin:  lastContentOrigin,
 					Events:         events,
 					Normalized:     NormalizeEvents(events),
 					Images:         imageURLs(events),
@@ -411,7 +522,87 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	return Result{}, fmt.Errorf("chathub response deadline exceeded before completion")
 }
 
-func buildWSURL(acc Account, sessionID, conversationID, requestID string) (string, error) {
+// Preconn is a pre-dialed, handshake-complete ChatHub connection whose URL
+// already carries the account and conversation identifiers of a future chat
+// invocation. Consuming it inside ChatWithEventsPreconn/ChatPreconn removes
+// TCP+TLS+upgrade+SignalR handshake from the answer's critical path — they
+// run while the caller is still busy with tool routing or uploads. The
+// connection is single-use: it is closed by the chat that consumes it, or
+// explicitly via Close when the answer never happens.
+type Preconn struct {
+	conn           *websocket.Conn
+	acc            Account
+	conversationID string
+	sessionID      string
+	requestID      string
+}
+
+// Close releases an unused pre-connection.
+func (p *Preconn) Close() { _ = p.conn.Close() }
+
+// ConversationID returns the conversation id baked into the pre-connected URL.
+func (p *Preconn) ConversationID() string { return p.conversationID }
+
+// SessionID returns the session id baked into the pre-connected URL.
+func (p *Preconn) SessionID() string { return p.sessionID }
+
+// Preconnect dials and completes the SignalR handshake ahead of time. The
+// dial is bounded to 10 seconds regardless of ctx so a slow network cannot
+// stall a request that could still dial fresh; on any failure the caller
+// simply proceeds with a normal Chat.
+func (c *Client) Preconnect(ctx context.Context, acc Account, conversationID, sessionID string) (*Preconn, error) {
+	if acc.AccessToken == "" || acc.OID == "" || acc.TID == "" {
+		return nil, fmt.Errorf("missing access token / oid / tid")
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
+	if conversationID == "" {
+		conversationID = uuid.NewString()
+	}
+	requestID := uuid.NewString()
+	wsURL, err := c.buildWSURL(acc, sessionID, conversationID, requestID)
+	if err != nil {
+		return nil, err
+	}
+	conn, _, err := c.Dialer.DialContext(dialCtx, wsURL, c.HTTPHeader.Clone())
+	if err != nil {
+		return nil, fmt.Errorf("ws dial: %w", err)
+	}
+	if err := signalRHandshake(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &Preconn{conn: conn, acc: acc, conversationID: conversationID, sessionID: sessionID, requestID: requestID}, nil
+}
+
+// signalRHandshake performs the SignalR JSON protocol handshake and validates
+// the server ack. A handshake-level rejection must fail the request up front
+// instead of surfacing later as an opaque first-frame read error.
+func signalRHandshake(conn *websocket.Conn) error {
+	_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"protocol":"json","version":1}`+rs)); err != nil {
+		return fmt.Errorf("handshake send: %w", err)
+	}
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		return fmt.Errorf("handshake recv: %w", err)
+	}
+	var ack struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.Trim(string(msg), rs))), &ack); err == nil && ack.Error != "" {
+		return fmt.Errorf("handshake rejected: %s", ack.Error)
+	}
+	return nil
+}
+
+// buildWSURL assembles the ChatHub WebSocket URL. WSBase overrides the
+// origin so tests can point the client at a fake SignalR server.
+func (c *Client) buildWSURL(acc Account, sessionID, conversationID, requestID string) (string, error) {
 	q := url.Values{}
 	q.Set("chatsessionid", requestID)
 	q.Set("clientrequestid", requestID)
@@ -429,12 +620,24 @@ func buildWSURL(acc Account, sessionID, conversationID, requestID string) (strin
 
 	// url.Values encodes quotes; probe used safe='",' so keep quotes unescaped-ish.
 	// Gorilla/url will encode " to %22 which MS accepts.
-	u := fmt.Sprintf("%s/%s@%s?%s", wsBase, acc.OID, acc.TID, q.Encode())
+	base := wsBase
+	if c.WSBase != "" {
+		base = c.WSBase
+	}
+	u := fmt.Sprintf("%s/%s@%s?%s", base, acc.OID, acc.TID, q.Encode())
 	return u, nil
 }
 
 func (c *Client) uploadAttachments(ctx context.Context, acc Account, conversationID string, attachments []Attachment) error {
 	imageCount := 0
+	// Upload failures are fatal to the request, not silently skipped: a
+	// missing DocID means the model never sees the attachment, which used to
+	// surface as the model answering "what image?" with no client-visible
+	// cause. Collect every failure and abort with an explicit error.
+	var uploadErrs []string
+	fail := func(format string, args ...any) {
+		uploadErrs = append(uploadErrs, fmt.Sprintf("image %d: %s", imageCount, fmt.Sprintf(format, args...)))
+	}
 	for i := range attachments {
 		a := &attachments[i]
 		if a.Type != "image" {
@@ -452,15 +655,18 @@ func (c *Client) uploadAttachments(ctx context.Context, acc Account, conversatio
 			}
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
 			if err != nil {
+				fail("build download request: %v", err)
 				continue
 			}
 			resp, err := c.HTTPClient.Do(req)
 			if err != nil {
+				fail("download: %v", err)
 				continue
 			}
 			body, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentMiB<<20))
 			resp.Body.Close()
 			if err != nil || resp.StatusCode != http.StatusOK {
+				fail("download status %s", resp.Status)
 				continue
 			}
 			mimeType := resp.Header.Get("Content-Type")
@@ -519,16 +725,19 @@ func (c *Client) uploadAttachments(ctx context.Context, acc Account, conversatio
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
 			log.Printf("[upload] http error: %v", err)
+			fail("upload http: %v", err)
 			continue
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		resp.Body.Close()
 		if readErr != nil {
 			log.Printf("[upload] read error: %v", readErr)
+			fail("upload read: %v", readErr)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			log.Printf("[upload] status %s: %s", resp.Status, strings.TrimSpace(string(data[:minInt(len(data), 500)])))
+			fail("upload status %s", resp.Status)
 			continue
 		}
 		var out struct {
@@ -541,10 +750,12 @@ func (c *Client) uploadAttachments(ctx context.Context, acc Account, conversatio
 		}
 		if err := json.Unmarshal(data, &out); err != nil {
 			log.Printf("[upload] json error: %v", err)
+			fail("upload response: %v", err)
 			continue
 		}
 		if out.Result.Value != "Success" || out.DocID == "" {
 			log.Printf("[upload] failed: %s", strings.TrimSpace(string(data)))
+			fail("upload rejected: %s", strings.TrimSpace(string(data[:minInt(len(data), 200)])))
 			continue
 		}
 		a.DocID = out.DocID
@@ -560,10 +771,22 @@ func (c *Client) uploadAttachments(ctx context.Context, acc Account, conversatio
 			c.Trace(map[string]any{"stage": "upload_success", "doc_id": a.DocID, "file_name": a.Name, "file_type": a.FileType})
 		}
 	}
+	if len(uploadErrs) > 0 {
+		return fmt.Errorf("attachment upload failed (%d/%d): %s", len(uploadErrs), imageCount, strings.Join(uploadErrs, "; "))
+	}
 	return nil
 }
 
-func chatPayload(text, sessionID, conversationID, requestID, tone string, firstTurn bool, attachments []Attachment, tools []Tool, toolChoice any, mcpServerURL string) string {
+// threadLevelGptID renders the declarative-agent attachment for the chat
+// frame. Empty means no agent: the browser sends an empty object.
+func threadLevelGptID(agentGptID string) map[string]any {
+	if agentGptID == "" {
+		return map[string]any{}
+	}
+	return map[string]any{"gpts": agentGptID}
+}
+
+func chatPayload(text, sessionID, conversationID, requestID, tone string, firstTurn bool, attachments []Attachment, tools []Tool, toolChoice any, mcpServerURL, agentGptID string) string {
 	text = toolProtocolPrompt(text, tools, toolChoice)
 	message := map[string]any{
 		"author":                "user",
@@ -660,9 +883,13 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 				"options":             map[string]any{},
 				"allowedMessageTypes": []string{
 					"Chat", "Suggestion", "Disengaged", "Progress", "EndOfRequest", "InternalLoaderMessage",
+					// Required to receive server-side code interpreter output
+					// (cwc_code_interpreter optionsSets are already requested)
+					// and live citation frames, mirroring the browser HAR list.
+					"GeneratedCode", "SearchResults", "SourceAttributions",
 				},
 				"sliceIds":          []any{},
-				"threadLevelGptId":  map[string]any{},
+				"threadLevelGptId":  threadLevelGptID(agentGptID),
 				"conversationId":    conversationID,
 				"traceId":           uuid.NewString(),
 				"isStartOfSession":  firstTurn,

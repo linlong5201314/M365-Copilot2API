@@ -3,6 +3,7 @@ package web
 import (
 	"errors"
 	"fmt"
+	"m365-copilot2api/internal/chathub"
 	"strings"
 	"sync"
 	"time"
@@ -23,10 +24,15 @@ func (e *UpstreamHTTPError) Error() string {
 
 // IsRateLimited reports whether err represents an upstream 429 or an
 // indistinguishable throttling signal (rate limit, too many requests,
-// throttled).
+// throttled). Structured ChatHub throttle errors take precedence over
+// free-form message matching.
 func IsRateLimited(err error) bool {
 	if err == nil {
 		return false
+	}
+	var throttleErr *chathub.ThrottleError
+	if errors.As(err, &throttleErr) {
+		return true
 	}
 	var httpErr *UpstreamHTTPError
 	if errors.As(err, &httpErr) {
@@ -37,6 +43,22 @@ func IsRateLimited(err error) bool {
 		strings.Contains(msg, "too many requests") ||
 		strings.Contains(msg, "rate limit") ||
 		strings.Contains(msg, "throttl")
+}
+
+// disengagedCooldown bounds how long an account rests after ChatHub's
+// Disengaged gate fired. The state self-heals in roughly 15 minutes and
+// hammering it again only extends the suppression, so rest longer than the
+// 2-minute rate-limit window.
+const disengagedCooldown = 15 * time.Minute
+
+// IsDisengaged reports whether err is ChatHub's Disengaged gate (empty or
+// filler-only output after upstream suppression).
+func IsDisengaged(err error) bool {
+	if err == nil {
+		return false
+	}
+	var disengagedErr *chathub.DisengagedError
+	return errors.As(err, &disengagedErr)
 }
 
 // IsAuthFailure reports whether err represents an upstream 401/403, meaning
@@ -63,21 +85,27 @@ func RetryAfterSeconds(err error) int {
 	return 0
 }
 
+// authFailTTL bounds how long an auth failure keeps an account out of
+// rotation. Without it, a transient AAD outage (spurious 401/403) would pin
+// every account as unusable until process restart.
+const authFailTTL = 10 * time.Minute
+
 // accountHealth tracks per-account failure state: rate-limited accounts are
 // cooled down and skipped by the round-robin until the window expires, and
-// auth-failed accounts are pinned as unusable.
+// auth-failed accounts are pinned as unusable until the TTL lapses.
 type accountHealth struct {
 	mu       sync.Mutex
 	cooldown map[string]time.Time
-	authFail map[string]bool
+	authFail map[string]time.Time
 }
 
 func newAccountHealth() *accountHealth {
-	return &accountHealth{cooldown: map[string]time.Time{}, authFail: map[string]bool{}}
+	return &accountHealth{cooldown: map[string]time.Time{}, authFail: map[string]time.Time{}}
 }
 
 // MarkFailure records the outcome of a request for one account.
-// rateLimited cools the account down for window; authFailed pins it.
+// rateLimited cools the account down for window; authFailed pins it for
+// authFailTTL so transient identity-platform failures can self-heal.
 func (h *accountHealth) MarkFailure(accountID string, err error, window time.Duration) {
 	if window <= 0 {
 		window = 60 * time.Second
@@ -85,8 +113,13 @@ func (h *accountHealth) MarkFailure(accountID string, err error, window time.Dur
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if IsAuthFailure(err) {
-		h.authFail[accountID] = true
+		h.authFail[accountID] = time.Now().Add(authFailTTL)
 		delete(h.cooldown, accountID)
+		return
+	}
+	if IsDisengaged(err) {
+		delete(h.authFail, accountID)
+		h.cooldown[accountID] = time.Now().Add(disengagedCooldown)
 		return
 	}
 	if IsRateLimited(err) {
@@ -107,8 +140,11 @@ func (h *accountHealth) MarkSuccess(accountID string) {
 func (h *accountHealth) Available(accountID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.authFail[accountID] {
-		return false
+	if until, ok := h.authFail[accountID]; ok {
+		if time.Now().Before(until) {
+			return false
+		}
+		delete(h.authFail, accountID)
 	}
 	if until, ok := h.cooldown[accountID]; ok && time.Now().Before(until) {
 		return false
@@ -120,17 +156,22 @@ func (h *accountHealth) Available(accountID string) bool {
 func (h *accountHealth) Snapshot() map[string]map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	now := time.Now()
 	out := make(map[string]map[string]any, len(h.cooldown)+len(h.authFail))
 	for id, until := range h.cooldown {
-		out[id] = map[string]any{"available": time.Now().After(until), "cooldownUntil": until}
+		out[id] = map[string]any{"available": now.After(until), "cooldownUntil": until}
 	}
-	for id, failed := range h.authFail {
-		if failed {
-			if _, ok := out[id]; !ok {
-				out[id] = map[string]any{}
-			}
-			out[id]["authFailed"] = true
+	for id, until := range h.authFail {
+		if now.After(until) {
+			// Expired auth failure: treat as healthy again.
+			delete(h.authFail, id)
+			continue
 		}
+		if _, ok := out[id]; !ok {
+			out[id] = map[string]any{}
+		}
+		out[id]["authFailed"] = true
+		out[id]["authFailUntil"] = until
 	}
 	return out
 }

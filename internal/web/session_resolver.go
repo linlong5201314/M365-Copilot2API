@@ -17,8 +17,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// sessionBinding 璁板綍涓€娆″唴瀹归敭澶嶇敤鐨勪細璇濄€侷dentity 瀛楁锛圛P/user锛変粎浣?
-// 璇婃柇鍏冩暟鎹繚鐣欙紝鍖归厤鍒ゅ畾鍙緷璧栦笂涓嬫枃鍐呭锛岃 Resolve 鐨勫唴瀹归敭閫昏緫銆?
+// sessionBinding 记录一次内容键复用的会话。身份字段（IP/user）仅作
+// 诊断元数据保留，匹配判定只依赖上下文内容，见 Resolve 的内容键逻辑。
 type sessionBinding struct {
 	SessionID      string    `json:"sessionId"`
 	ConversationID string    `json:"conversationId"`
@@ -27,9 +27,8 @@ type sessionBinding struct {
 	LastUsedAt     time.Time `json:"lastUsedAt"`
 	IPFingerprint  string    `json:"ipFingerprint,omitempty"`
 	UserField      string    `json:"userField,omitempty"`
-	ContextFinger  string    `json:"contextFinger,omitempty"`
-	// ContextHistory 鎸佷箙鍖栦繚瀛樻渶杩戜竴娆″崗璁殑瀹屾暣娑堟伅锛屼緵閲嶅惎鍚庣户缁仛
-	// 鍐呭鍓嶇紑鍖归厤锛岄伩鍏嶈繘绋嬮噸鍚鑷存墍鏈変細璇濋敭鍏ㄩ儴澶辨晥銆?
+	// ContextHistory 持久化保存最近一次协议请求的完整消息，供重启后继续做
+	// 内容前缀匹配，避免进程重启导致所有会话键全部失效。
 	ContextHistory []oaiMsg `json:"contextHistory,omitempty"`
 }
 
@@ -37,10 +36,6 @@ type sessionResolver struct {
 	mu          sync.Mutex
 	path        string
 	sessions    map[string]sessionBinding
-	byExplicit  map[string]string // explicitID -> sessionID
-	byUserField map[string]string // userField -> sessionID
-	byIPFinger  map[string]string // ipFingerprint -> sessionID
-	byContext   map[string]string // contextFingerprint -> sessionID
 	ttl         time.Duration
 	contextTTL  time.Duration
 	maxSessions int
@@ -49,21 +44,29 @@ type sessionResolver struct {
 
 const defaultMaxSessions = 1000
 
+// envDurationMinutes parses a minutes-based env var. Plain numbers mean
+// minutes ("120" → 120m); Go duration strings ("2h", "90m") pass through.
+// The old v+"m" concatenation silently broke unit-bearing values ("2h" →
+// "2hm" failed to parse and fell back to the default).
+func envDurationMinutes(v string, def time.Duration) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return time.Duration(n) * time.Minute
+	}
+	return def
+}
+
 func openSessionResolver() *sessionResolver {
-	// 闂茬疆 2 灏忔椂鍗宠涓鸿繃鏈燂紙鐢ㄦ埛锛? 灏忔椂涓嶆椿璺冨凡缁忕畻涔咃級銆備細璇濊繃鏈熷悗
-	// 浠?sessions.json 鍓旈櫎锛屼簯绔璇濅氦缁?auto_cleanup 鎸夌浉鍚岀獥鍙ｅ洖鏀躲€?
-	ttl := 2 * time.Hour
-	if v := os.Getenv("M365_SESSION_TTL_MINUTES"); v != "" {
-		if d, err := time.ParseDuration(v + "m"); err == nil {
-			ttl = d
-		}
-	}
-	contextTTL := 2 * time.Hour
-	if v := os.Getenv("M365_CONTEXT_TTL_MINUTES"); v != "" {
-		if d, err := time.ParseDuration(v + "m"); err == nil {
-			contextTTL = d
-		}
-	}
+	// 闲置 2 小时即视为过期（用户 2 小时不活跃已经算久了）。会话过期后
+	// 从 sessions.json 剔除，云端对话交给 auto_cleanup 按同一窗口回收。
+	ttl := envDurationMinutes(os.Getenv("M365_SESSION_TTL_MINUTES"), 2*time.Hour)
+	contextTTL := envDurationMinutes(os.Getenv("M365_CONTEXT_TTL_MINUTES"), 2*time.Hour)
 	path := os.Getenv("M365_SESSION_CACHE")
 	if path == "" {
 		path = "sessions.json"
@@ -71,10 +74,6 @@ func openSessionResolver() *sessionResolver {
 	sr := &sessionResolver{
 		path:        path,
 		sessions:    map[string]sessionBinding{},
-		byExplicit:  map[string]string{},
-		byUserField: map[string]string{},
-		byIPFinger:  map[string]string{},
-		byContext:   map[string]string{},
 		ttl:         ttl,
 		contextTTL:  contextTTL,
 		maxSessions: defaultMaxSessions,
@@ -115,23 +114,17 @@ func (sr *sessionResolver) flush() error {
 }
 
 func (sr *sessionResolver) reindexLocked(s sessionBinding) {
+	// Resolve matches by linear scan (IP fingerprint filter + content prefix),
+	// so no secondary index is maintained: every candidate index in the
+	// history of this file was write-only dead weight.
 	sr.sessions[s.SessionID] = s
-	if s.UserField != "" {
-		sr.byUserField[s.UserField] = s.SessionID
-	}
-	if s.IPFingerprint != "" {
-		sr.byIPFinger[s.IPFingerprint] = s.SessionID
-	}
-	if s.ContextFinger != "" {
-		sr.byContext[s.ContextFinger] = s.SessionID
-	}
 }
 
 func (sr *sessionResolver) evictLocked() {
 	now := time.Now().UTC()
 	for id, s := range sr.sessions {
 		if now.Sub(s.LastUsedAt) > sr.ttl {
-			sr.dropLocked(id, s)
+			sr.dropLocked(id)
 		}
 	}
 	if len(sr.sessions) > sr.maxSessions {
@@ -144,22 +137,13 @@ func (sr *sessionResolver) evictLocked() {
 		}
 		sort.Slice(ids, func(i, j int) bool { return last[ids[i]].Before(last[ids[j]]) })
 		for _, id := range ids[:len(sr.sessions)-sr.maxSessions] {
-			sr.dropLocked(id, sr.sessions[id])
+			sr.dropLocked(id)
 		}
 	}
 }
 
-func (sr *sessionResolver) dropLocked(id string, s sessionBinding) {
+func (sr *sessionResolver) dropLocked(id string) {
 	delete(sr.sessions, id)
-	if sr.byUserField[s.UserField] == id {
-		delete(sr.byUserField, s.UserField)
-	}
-	if sr.byIPFinger[s.IPFingerprint] == id {
-		delete(sr.byIPFinger, s.IPFingerprint)
-	}
-	if sr.byContext[s.ContextFinger] == id {
-		delete(sr.byContext, s.ContextFinger)
-	}
 }
 
 type ResolveResult struct {
@@ -168,8 +152,8 @@ type ResolveResult struct {
 	AccountID      string
 	MatchedBy      string
 	IsNew          bool
-	// HistoryLen 鏄鐢ㄥ懡涓椂"浜戠瀵硅瘽宸插寘鍚殑娑堟伅鏉℃暟"锛?
-	// 鍗冲閲忓彂閫佺殑璧风偣涓嬫爣锛坆ody.Messages[HistoryLen:] 鍙彂鏂板閮ㄥ垎锛夈€?
+	// HistoryLen 是复用命中时"云端对话已包含的消息条数"，
+	// 即增量发送的起点下标（body.Messages[HistoryLen:] 只发新增部分）。
 	HistoryLen int
 }
 
@@ -177,24 +161,6 @@ func clientIPFingerprint(r *http.Request) string {
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ua := r.Header.Get("User-Agent")
 	data := host + "|" + ua
-	h := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(h[:16])
-}
-
-func contextFingerprint(messages []oaiMsg) string {
-	if len(messages) == 0 {
-		return ""
-	}
-	var parts []string
-	limit := len(messages)
-	if limit > 3 {
-		limit = 3
-	}
-	for i := len(messages) - limit; i < len(messages); i++ {
-		m := messages[i]
-		parts = append(parts, m.Role+":"+contentToString(m.Content))
-	}
-	data := strings.Join(parts, "||")
 	h := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(h[:16])
 }
@@ -253,24 +219,11 @@ func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult 
 
 	explicitID := r.Header.Get("X-M365-Session-Id")
 
-	// 瀹㈡埛绔樉寮忔寚瀹氱殑浼氳瘽 ID 鏄渶楂樹紭鍏堢殑缁帴璇箟锛氫笉鍙備笌浠讳綍韬唤鍒ゅ畾锛?
-	// 鐢辫皟鐢ㄦ柟涓诲姩鍐冲畾瑕佺户缁摢涓簯绔璇濄€?
+	// 客户端显式指定的会话 ID 是最高优先级的续接语义：不参与任何身份判定，
+	// 由调用方主动决定要继续哪个云端对话。
 	if explicitID != "" {
-		if sessID, ok := sr.byExplicit[explicitID]; ok {
-			if sess, ok := sr.sessions[sessID]; ok {
-			sess.LastUsedAt = time.Now().UTC()
-			sr.sessions[sessID] = sess
-			sr.persist.markDirty()
-			return ResolveResult{
-				SessionID:      sess.SessionID,
-				ConversationID: sess.ConversationID,
-				AccountID:      sess.AccountID,
-				MatchedBy:      "explicit",
-				IsNew:          false,
-				HistoryLen:     len(sess.ContextHistory),
-			}
-			}
-		}
+		// Explicit IDs address the session store directly; no fingerprint or
+		// secondary index participates.
 		if sess, ok := sr.sessions[explicitID]; ok {
 			sess.LastUsedAt = time.Now().UTC()
 			sr.sessions[explicitID] = sess
@@ -286,9 +239,9 @@ func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult 
 		}
 	}
 
-	// 鍐呭閿細鍗忚娑堟伅鍚嶅簭鍒椾弗鏍肩瓑浜庢煇涓凡璁板綍浼氳瘽鐨勫巻鍙叉椂鐩存帴澶嶇敤杩欎釜
-	// 浜戠瀵硅瘽锛屼絾鍙湪鍚屼竴 IP/UA 鎸囩汗涓嬶紝閬垮厤鐭秷鎭湪涓嶅悓鐢ㄦ埛闂翠簰绔?
-	// HistoryLen 杩斿洖璇ュ墠缂€闀垮害锛屼笂灞傛嵁姝ゅ彧鍙戦€?messages[HistoryLen:] 澧為噺銆?
+	// 内容键：协议消息序列严格等于某个已记录会话的历史时直接复用这个
+	// 云端对话，但只在同一 IP/UA 指纹下，避免短消息在不同用户间互串。
+	// HistoryLen 返回该前缀长度，上层据此只发送 messages[HistoryLen:] 增量。
 	ipFinger := clientIPFingerprint(r)
 	if bestID, n := sr.matchContextLocked(ipFinger, body.Messages); bestID != "" {
 		sess := sr.sessions[bestID]
@@ -305,8 +258,8 @@ func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult 
 		}
 	}
 
-	// 寮辩害鏉熷厹搴曪細鍐呭涓嶆瀯鎴愪弗鏍煎墠缂€锛屼絾涓庢煇涓巻鍙查珮搴︾浉浼硷紙濡傚鎴风
-	// 鏈湴鎴柇浜嗗巻鍙诧級锛屼粛澶嶇敤璇ヤ細璇濄€傛鏃跺閲忚竟鐣屾湭鐭ワ紝涓婂眰鍙戦€佸叏閲忋€?
+	// 弱约束兜底：内容不构成严格前缀，但与某个历史高度相似（如客户端
+	// 本地截断了历史），仍复用该会话。此时增量边界未知，上层发送全量。
 	threshold := 0.6
 	if v := os.Getenv("M365_CONTEXT_SIMILARITY"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
@@ -350,9 +303,9 @@ func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult 
 	return ResolveResult{IsNew: true}
 }
 
-// matchContextLocked 浠庡叏閮ㄤ細璇濅腑鎵惧埌鍏?contextHistory 涓ユ牸浣滀负娑堟伅鍓嶇紑鐨?
-// 閭ｄ釜浼氳瘽锛涘彧閫夊墠缂€鏈€闀跨殑涓€涓紝閬垮厤鐭墠缂€鍦ㄤ笉鍚屼細璇濋棿浜掓挒銆傝繑鍥?
-// (sessionID, 鍖归厤鍒扮殑娑堟伅鏉℃暟)銆?
+// matchContextLocked 从全部会话中找到其 contextHistory 严格作为消息前缀的
+// 那个会话；只选前缀最长的一个，避免短前缀在不同会话间互撞。返回
+// (sessionID, 匹配到的消息条数)。
 func (sr *sessionResolver) matchContextLocked(ipFinger string, messages []oaiMsg) (string, int) {
 	if len(messages) == 0 {
 		return "", 0
@@ -377,8 +330,8 @@ func (sr *sessionResolver) matchContextLocked(ipFinger string, messages []oaiMsg
 	return bestID, bestN
 }
 
-// contextPrefixLen 杩斿洖 hist 鏄惁涓ユ牸鏄?msgs 鐨勫墠缂€銆俬ist 涓虹┖鎴栦笉鏄墠缂€
-// 鏃惰繑鍥?0锛涘懡涓椂杩斿洖 len(hist)锛屽嵆澧為噺鍙戦€佽捣鐐广€?
+// contextPrefixLen 返回 hist 是否严格是 msgs 的前缀。hist 为空或不是前缀
+// 时返回 0；命中时返回 len(hist)，即增量发送起点。
 func contextPrefixLen(hist, msgs []oaiMsg) int {
 	if len(hist) == 0 || len(msgs) < len(hist) {
 		return 0
@@ -391,8 +344,8 @@ func contextPrefixLen(hist, msgs []oaiMsg) int {
 	return len(hist)
 }
 
-// messagesEqual 鍒ゅ畾涓ゆ潯娑堟伅鍦ㄤ細璇濋敭鎰忎箟涓婄瓑浠凤細role 涓庢枃鏈唴瀹逛竴鑷淬€?
-// 蹇界暐 tool_calls 鐨?ID 缁嗚妭锛堜細璇濋敭鍙叧蹇冨唴瀹瑰浣曡妯″瀷娑堝寲锛夈€?
+// messagesEqual 判定两条消息在会话键意义上等价：role 与文本内容一致。
+// 忽略 tool_calls 的 ID 细节（会话键只关心内容如何被模型消化）。
 func messagesEqual(a, b oaiMsg) bool {
 	if a.Role != b.Role {
 		return false
@@ -451,24 +404,20 @@ func (sr *sessionResolver) Bind(sessionID, conversationID, accountID string, bod
 			sess.LastUsedAt = now
 			sess.UserField = body.User
 			sess.IPFingerprint = clientIPFingerprint(r)
-			sess.ContextFinger = contextFingerprint(body.Messages)
 			sess.ContextHistory = cloneMessages(body.Messages)
-			sr.sessions[sessionID] = sess
 			sr.reindexLocked(sess)
 			sr.persist.markDirty()
 			return
 		}
 	}
 	if sessionID == "" {
-		for sid, sess := range sr.sessions {
+		for _, sess := range sr.sessions {
 			if sess.ConversationID == conversationID {
 				sess.LastUsedAt = now
 				sess.AccountID = accountID
 				sess.UserField = body.User
 				sess.IPFingerprint = clientIPFingerprint(r)
-				sess.ContextFinger = contextFingerprint(body.Messages)
 				sess.ContextHistory = cloneMessages(body.Messages)
-				sr.sessions[sid] = sess
 				sr.reindexLocked(sess)
 				sr.persist.markDirty()
 				return
@@ -485,7 +434,6 @@ func (sr *sessionResolver) Bind(sessionID, conversationID, accountID string, bod
 		LastUsedAt:     now,
 		IPFingerprint:  clientIPFingerprint(r),
 		UserField:      body.User,
-		ContextFinger:  contextFingerprint(body.Messages),
 		ContextHistory: cloneMessages(body.Messages),
 	}
 
@@ -516,21 +464,10 @@ func (sr *sessionResolver) ListSessions() []sessionBinding {
 func (sr *sessionResolver) DeleteSession(sessionID string) bool {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
-	s, ok := sr.sessions[sessionID]
-	if !ok {
+	if _, ok := sr.sessions[sessionID]; !ok {
 		return false
 	}
 	delete(sr.sessions, sessionID)
-	delete(sr.byExplicit, sessionID)
-	if s.UserField != "" {
-		delete(sr.byUserField, s.UserField)
-	}
-	if s.IPFingerprint != "" {
-		delete(sr.byIPFinger, s.IPFingerprint)
-	}
-	if s.ContextFinger != "" {
-		delete(sr.byContext, s.ContextFinger)
-	}
 	sr.persist.markDirty()
 	return true
 }
@@ -547,16 +484,6 @@ func (sr *sessionResolver) UnbindByConversation(conversationID string) int {
 			continue
 		}
 		delete(sr.sessions, sid)
-		delete(sr.byExplicit, sid)
-		if s.UserField != "" {
-			delete(sr.byUserField, s.UserField)
-		}
-		if s.IPFingerprint != "" {
-			delete(sr.byIPFinger, s.IPFingerprint)
-		}
-		if s.ContextFinger != "" {
-			delete(sr.byContext, s.ContextFinger)
-		}
 		removed++
 	}
 	if removed > 0 {

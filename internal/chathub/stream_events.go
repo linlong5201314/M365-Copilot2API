@@ -37,6 +37,19 @@ func classifyUpdateMessages(messages []any) []StreamEvent {
 		if origin == "ChainOfThoughtSummary" || cot {
 			kind = "reasoning"
 		}
+		// Disengaged is upstream quality/capacity gating: the turn produces
+		// either nothing or a canned filler message. The client treats a
+		// disengaged turn with zero real output as a structured failure
+		// instead of streaming the filler as an answer.
+		if mt == "Disengaged" {
+			kind = "disengaged"
+		}
+		// Code-interpreter output and attribution frames carry structured
+		// payloads, not answer prose. Surface them to handlers as progress so
+		// their text never leaks into the answer stream.
+		if mt == "GeneratedCode" || ct == "SourceAttributions" {
+			kind = "progress"
+		}
 		name, args := extractToolFields(m)
 		if name != "" && len(args) > 0 && WebSearchUsable(name, args) {
 			kind = "tool"

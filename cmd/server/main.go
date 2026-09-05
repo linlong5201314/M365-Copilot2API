@@ -27,7 +27,7 @@ func main() {
 	s.InitM365CloudClient()
 	s.StartAutoCleanup()
 	listen := resolveListenAddress(os.Getenv("PORT"), os.Getenv("M365_LISTEN"))
-	log.Printf("m365-copilot2api listening on http://%s\\n", listen)
+	log.Printf("m365-copilot2api listening on http://%s", listen)
 	server := &http.Server{
 		Addr:              listen,
 		Handler:           s.Routes(),

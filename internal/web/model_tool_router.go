@@ -1,10 +1,74 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+
+	"m365-copilot2api/internal/chathub"
 )
+
+// runToolRouter asks the upstream model to pick the next tool through a
+// throwaway router conversation, with one repair round on unparsable output.
+// Router and repair conversations are deleted after use so the conversation
+// list does not accumulate one entry per routed request.
+//
+// A disengaged router (typical with large tool catalogs) returns
+// (nil, zero Result, false, nil) so the caller can fall back to an ordinary
+// answer instead of failing the whole request; other router failures return
+// an error already prefixed with "tool router:".
+func (s *Server) runToolRouter(ctx context.Context, account chathub.Account, tone, traceID, routeContext string, routeMaps []map[string]any, toolChoice any, attachments []chathub.Attachment, ledger agentLedger) ([]detectedToolCall, chathub.Result, bool, error) {
+	routePrompt := modelToolRouterPrompt(routeContext, routeMaps, toolChoice)
+	log.Printf("[req-trace] id=%s stage=router_start prompt_len=%d", traceID, len(routePrompt))
+	routeRes, routeErr := s.chat.Chat(ctx, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: attachments})
+	if routeErr == nil && routeRes.ConversationID != "" {
+		s.dropTransientConversation(routeRes.ConversationID)
+	}
+	if routeErr != nil {
+		if IsDisengaged(routeErr) {
+			log.Printf("[req-trace] id=%s stage=router_disengaged fallback=plain_answer", traceID)
+			return nil, chathub.Result{}, false, nil
+		}
+		return nil, chathub.Result{}, false, fmt.Errorf("tool router: %w", routeErr)
+	}
+	calls, parsed := parseModelToolDecision(routeRes.Text, routeMaps, toolChoice)
+	calls = filterCompletedCalls(calls, ledger)
+	if !parsed {
+		repairRes, repairErr := s.chat.Chat(ctx, account, chathub.Request{
+			Text:        repairRouterPrompt(routeRes.Text),
+			Tone:        tone,
+			Attachments: attachments,
+		})
+		if repairErr == nil && repairRes.ConversationID != "" {
+			s.dropTransientConversation(repairRes.ConversationID)
+		}
+		if repairErr == nil {
+			calls, parsed = parseModelToolDecision(repairRes.Text, routeMaps, toolChoice)
+			calls = filterCompletedCalls(calls, ledger)
+		}
+	}
+	return calls, routeRes, parsed, nil
+}
+
+// repairRouterPrompt asks the model to reformat an unparsable routing
+// decision as JSON only.
+func repairRouterPrompt(raw string) string {
+	return `Repair this tool routing output into JSON only with shape {"calls":[{"name":"function_name","arguments":{}}]}. Use {"calls":[]} if no tool is needed. OUTPUT:
+` + compactToolResult(raw, 6000)
+}
+
+// finalizeToolCalls assigns stable scoped call IDs (scope "" keeps existing
+// IDs) and applies the adaptive parallel-call limit.
+func (s *Server) finalizeToolCalls(calls []detectedToolCall, scope string) []detectedToolCall {
+	if scope != "" {
+		for i := range calls {
+			calls[i].ID = scopedCallID(calls[i].Name, string(calls[i].Arguments), i, scope)
+		}
+	}
+	return limitToolCalls(calls, adaptiveToolCallLimit(calls, configuredToolCallLimit(s.settings)))
+}
 
 func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) string {
 	defs, _ := json.Marshal(tools)

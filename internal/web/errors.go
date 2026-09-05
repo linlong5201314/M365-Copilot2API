@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -30,13 +31,17 @@ func upstreamError(err error) string {
 
 // upstreamStatus maps a failed upstream call to the client-visible HTTP status:
 // rate limits stay 429 (with Retry-After when known), auth failures become 401,
-// everything else is 502. Unknown upstream failures must never leak internals.
+// disengaged turns rest at 503, everything else is 502. Unknown upstream
+// failures must never leak internals.
 func upstreamStatus(err error) int {
 	if IsRateLimited(err) {
 		return http.StatusTooManyRequests
 	}
 	if IsAuthFailure(err) {
 		return http.StatusUnauthorized
+	}
+	if IsDisengaged(err) {
+		return http.StatusServiceUnavailable
 	}
 	return http.StatusBadGateway
 }
@@ -48,4 +53,29 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
 	}
 	http.Error(w, upstreamError(err), upstreamStatus(err))
+}
+
+// upstreamErrorCode maps a failed upstream call to a coarse client-safe code
+// for SSE error chunks. Consumers use it for backoff decisions, so distinct
+// failure classes must not all collapse into "rate_limit".
+func upstreamErrorCode(err error) string {
+	if err == nil {
+		return "upstream_error"
+	}
+	if IsRateLimited(err) {
+		return "rate_limit"
+	}
+	if IsAuthFailure(err) {
+		return "upstream_auth"
+	}
+	if IsDisengaged(err) {
+		return "content_filter"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	return "upstream_error"
 }

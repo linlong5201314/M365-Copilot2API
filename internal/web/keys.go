@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -175,7 +176,9 @@ func (s *apiKeyStore) valid(raw string) bool {
 	h := keyHash(raw)
 	found := false
 	for i := range s.Keys {
-		if s.Keys[i].Hash == h && !s.Keys[i].Revoked {
+		// Constant-time hash comparison: even though these are SHA-256 digests
+		// of high-entropy keys, avoid leaking match position through timing.
+		if subtle.ConstantTimeCompare([]byte(s.Keys[i].Hash), []byte(h)) == 1 && !s.Keys[i].Revoked {
 			now := time.Now()
 			s.Keys[i].LastUsedAt = &now
 			found = true

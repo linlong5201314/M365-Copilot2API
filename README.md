@@ -53,9 +53,10 @@ M365 Copilot2API 是一个用 Go 编写的自托管网关，把微软 365 Copilo
 
 | 功能 | 说明 |
 |------|------|
-| OpenAI 兼容 `/v1/chat/completions` | 支持流式输出与 function calling |
+| OpenAI 兼容 `/v1/chat/completions` | 支持流式输出、`reasoning_content`（DeepSeek 风格思维链）与 function calling |
+| OpenAI 采样参数本地生效 | `max_tokens`/`max_completion_tokens` 截断并返回 `finish_reason:"length"`；`stop` 序列本地拦截；`stream_options.include_usage` 终帧回 usage；`temperature`/`top_p`/惩罚项范围校验；`n>1` 显式报错 |
 | OpenAI Responses `/v1/responses` | 兼容 Responses 协议（Codex 等客户端） |
-| Anthropic 兼容 `/v1/messages` | Claude Code / Cursor 直连 |
+| Anthropic 兼容 `/v1/messages` | Claude Code / Cursor 直连；**真流式**（增量 SSE，非聚合回放）+ `/v1/messages/count_tokens` |
 | SSE 流式输出 | 逐字实时返回，`stream: true` |
 | 工具调用转换 | OpenAI function calling ⇄ M365 工具协议，`router` / `native` 两种规划模式 |
 | 内容键会话复用 | 以对话上下文为键复用云端对话，命中时只发送增量消息（类似 DeepSeek 上下文缓存） |
@@ -213,6 +214,7 @@ docker compose up -d --build
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `M365_TOOL_PLANNING_MODE` | `router` | 工具规划模式：`router`（网关路由规划）/ `native`（云端原生规划） |
+| `M365_AGENT_GPT_ID` | 空 | 绑定已发布的 Copilot Studio 声明式 agent（`threadLevelGptId.gpts`），仅对携带工具的请求生效（agent 会覆盖上游 tone 为 GPT-5）。工具调用可靠性差的租户可参考社区 Copilot Studio 方案创建 agent 后在此填入 ID |
 | `M365_MAX_TOOL_CALLS_PER_TURN` | `1` | 单轮最多并行工具调用数（有副作用操作自动降为串行） |
 | `M365_MAX_TOOL_ROUNDS` | `16` | 单次请求最大工具轮次 |
 | `M365_CONTEXT_WINDOW` | `128000` | 上下文窗口 |
@@ -398,7 +400,8 @@ curl http://127.0.0.1:4141/v1/messages \
 | `/v1/models` | GET | 模型目录 |
 | `/v1/chat/completions` | POST | 聊天补全（流式 / 工具调用） |
 | `/v1/responses` | POST | OpenAI Responses 协议 |
-| `/v1/messages` | POST | Anthropic Messages（需 `x-api-key` + `anthropic-version`） |
+| `/v1/messages` | POST | Anthropic Messages（需 `x-api-key` + `anthropic-version`，流式为增量 SSE） |
+| `/v1/messages/count_tokens` | POST | Anthropic token 计数（本地 tiktoken 估算） |
 | `/v1/images/generations` | POST | 图像生成 |
 | `/v1/sessions` | GET / POST | 查询会话绑定 / 按 `session_id` 查询或创建 |
 | `/v1/sessions/{id}` | DELETE | 解除会话绑定 |

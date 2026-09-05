@@ -128,6 +128,44 @@ func (s *CacheStats) Reset() {
 	s.KeyStats = make(map[string]*KeyStat)
 }
 
+// EstimateTokens counts completion/request text with the embedded tiktoken
+// O200k vocabulary; the heuristic character count is only a fallback if the
+// codec fails to initialize.
 func EstimateTokens(text string) int64 {
-	return int64(len(text) / 4)
+	if enc, err := getGPTTokenizer(); err == nil {
+		if ids, _, encErr := enc.Encode(text); encErr == nil {
+			return int64(len(ids))
+		}
+	}
+	return int64(heuristicTokenCount(text))
+}
+
+// truncateToTokens cuts text to at most max tokens, reporting whether any cut
+// happened. Used to honor client max_tokens on non-stream completions.
+func truncateToTokens(text string, max int64) (string, bool) {
+	if max <= 0 {
+		return text, false
+	}
+	enc, err := getGPTTokenizer()
+	if err != nil {
+		total := int64(heuristicTokenCount(text))
+		if total <= max {
+			return text, false
+		}
+		r := []rune(text)
+		cut := int(float64(len(r)) * float64(max) / float64(total))
+		if cut > len(r) {
+			cut = len(r)
+		}
+		return string(r[:cut]), true
+	}
+	ids, _, encErr := enc.Encode(text)
+	if encErr != nil || int64(len(ids)) <= max {
+		return text, false
+	}
+	out, decErr := enc.Decode(ids[:max])
+	if decErr != nil {
+		return text, false
+	}
+	return out, true
 }

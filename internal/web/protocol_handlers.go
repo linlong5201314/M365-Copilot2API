@@ -366,25 +366,49 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
+	model := firstNonEmpty(body.Model, "m365-copilot")
+	recordUsage := func(status int, output string) {
+		estimate := estimateResponsesUsage(model, o.Messages, o.Tools, o.ToolChoice, output)
+		s.usage.record(UsageRecord{
+			Time:         time.Now(),
+			APIKeyPrefix: extractAPIKey(r),
+			Model:        model,
+			Endpoint:     "/v1/messages",
+			InputTokens:  int64(estimate.Values["input_tokens"].(int)),
+			OutputTokens: int64(estimate.Values["output_tokens"].(int)),
+			DurationMs:   time.Since(startedAt).Milliseconds(),
+			Status:       status,
+		})
+	}
+	if body.Stream {
+		// True streaming: OpenAI SSE is converted to Anthropic events
+		// incrementally; the old path aggregated the full completion first.
+		output, _, ok := s.streamAnthropicAdapter(w, r, o, model)
+		status := http.StatusOK
+		if !ok {
+			status = http.StatusBadGateway
+		}
+		recordUsage(status, output)
+		return
+	}
 	out, raw, status, err := s.runOpenAIAdapter(r, o)
 	if status >= 400 {
+		recordUsage(status, "")
 		writeAnthropicError(w, status, "api_error", errorMessage(raw, "upstream protocol error"))
 		return
 	}
 	if err != nil {
+		recordUsage(http.StatusBadGateway, "")
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "upstream protocol error: "+err.Error())
 		return
 	}
-	estimate := estimateResponsesUsage(firstNonEmpty(body.Model, "m365-copilot"), o.Messages, o.Tools, o.ToolChoice, "")
-	s.usage.record(UsageRecord{
-		Time:         time.Now(),
-		APIKeyPrefix: extractAPIKey(r),
-		Model:        firstNonEmpty(body.Model, "m365-copilot"),
-		Endpoint:     "/v1/messages",
-		InputTokens:  int64(estimate.Values["input_tokens"].(int)),
-		OutputTokens: int64(estimate.Values["output_tokens"].(int)),
-		DurationMs:   time.Since(startedAt).Milliseconds(),
-		Status:       200,
-	})
-	writeAnthropicResult(w, firstNonEmpty(body.Model, "m365-copilot"), body.Stream, out)
+	outputForUsage := ""
+	if msg, _ := openAIChoice(out); msg != nil {
+		outputForUsage = fmt.Sprint(msg["content"])
+		if calls, ok := msg["tool_calls"].([]any); ok {
+			outputForUsage += fmt.Sprint(calls)
+		}
+	}
+	recordUsage(http.StatusOK, outputForUsage)
+	writeAnthropicResult(w, model, body.Stream, out)
 }

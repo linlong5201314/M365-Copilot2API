@@ -173,17 +173,27 @@ type anthropicTool struct {
 	InputSchema map[string]any `json:"input_schema"`
 }
 type anthropicRequest struct {
-	Model      string             `json:"model"`
-	System     any                `json:"system,omitempty"`
-	Messages   []anthropicMessage `json:"messages"`
-	Tools      []anthropicTool    `json:"tools,omitempty"`
-	ToolChoice any                `json:"tool_choice,omitempty"`
-	Stream     bool               `json:"stream,omitempty"`
-	MaxTokens  int                `json:"max_tokens,omitempty"`
+	Model         string             `json:"model"`
+	System        any                `json:"system,omitempty"`
+	Messages      []anthropicMessage `json:"messages"`
+	Tools         []anthropicTool    `json:"tools,omitempty"`
+	ToolChoice    any                `json:"tool_choice,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	MaxTokens     int                `json:"max_tokens,omitempty"`
+	StopSequences []string           `json:"stop_sequences,omitempty"`
 }
 
 func (r anthropicRequest) openAI() (oaiReq, error) {
 	o := oaiReq{Model: r.Model, Stream: r.Stream}
+	// max_tokens and stop_sequences are honored locally by the gateway (ChatHub
+	// exposes neither upstream); see normalizeSamplingParams.
+	if r.MaxTokens > 0 {
+		maxTokens := r.MaxTokens
+		o.MaxTokens = &maxTokens
+	}
+	if len(r.StopSequences) > 0 {
+		o.Stop = r.StopSequences
+	}
 	if r.System != nil {
 		o.Messages = append(o.Messages, oaiMsg{Role: "system", Content: r.System})
 	}

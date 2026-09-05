@@ -62,6 +62,11 @@ type runtimeSettings struct {
 	Scope               string         `json:"scope"`
 	ModelMappings       []modelMapping `json:"modelMappings"`
 	ToolPlanningMode    string         `json:"toolPlanningMode"`
+	// AgentGptID attaches a published Copilot Studio declarative agent
+	// (threadLevelGptId.gpts) to tool-bearing answer turns. Upstream forces
+	// the GPT-5 tone while an agent is attached, so text-only turns never
+	// carry it. Configurable in the console settings or via M365_AGENT_GPT_ID.
+	AgentGptID string `json:"agentGptId"`
 }
 
 type settingsStore struct {
@@ -87,6 +92,7 @@ func defaultRuntimeSettings() runtimeSettings {
 		Authority: os.Getenv("M365_AUTHORITY"), RedirectURI: os.Getenv("M365_REDIRECT_URI"), Scope: os.Getenv("M365_SCOPE"),
 		ModelMappings:    append([]modelMapping(nil), defaultModelMappings...),
 		ToolPlanningMode: toolPlanningMode(os.Getenv("M365_TOOL_PLANNING_MODE")),
+		AgentGptID:       strings.TrimSpace(os.Getenv("M365_AGENT_GPT_ID")),
 	}
 }
 func settingsPath() string {

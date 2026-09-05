@@ -274,7 +274,10 @@ func (s *Store) refreshInflight(acc AccountToken) (AccountToken, error) {
 	s.inflight[acc.ID] = f
 	s.mu.Unlock()
 
-	tok, err := Refresh(acc.RefreshToken)
+	// Refresh tokens are bound to the client that redeemed them; imported
+	// accounts may use a per-account client, so never fall back to the global
+	// one here. RefreshWithClient already defaults empty ids to ClientID().
+	tok, err := RefreshWithClient(acc.RefreshToken, acc.ClientID)
 	if err != nil {
 		acc.Status = "expired"
 		s.mu.Lock()
