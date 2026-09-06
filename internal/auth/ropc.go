@@ -20,6 +20,32 @@ func ROPCClientID() string {
 	return DeviceClientID()
 }
 
+// ropcTokenEndpoint resolves the token endpoint for the password (ROPC)
+// grant. Microsoft rejects password grants on the /common and /consumers
+// authorities (AADSTS9001023), so those resolve to /organizations; a
+// tenant-specific authority is respected as-is, and an explicit
+// M365_TOKEN_ENDPOINT always wins.
+func ropcTokenEndpoint() string {
+	if endpoint := strings.TrimSpace(os.Getenv("M365_TOKEN_ENDPOINT")); endpoint != "" {
+		return endpoint
+	}
+	authority := strings.TrimRight(Authority(), "/")
+	u, err := url.Parse(authority)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return authority + "/oauth2/v2.0/token"
+	}
+	switch strings.Trim(u.Path, "/") {
+	case "", "common", "consumers":
+		return u.Scheme + "://" + u.Host + "/organizations/oauth2/v2.0/token"
+	case "organizations":
+		return authority + "/oauth2/v2.0/token"
+	default:
+		// Tenant-specific authority (tenant id or verified domain): password
+		// grants are accepted there, so keep the operator's choice.
+		return authority + "/oauth2/v2.0/token"
+	}
+}
+
 // LoginWithPassword redeems an email/password pair through the OAuth ROPC
 // (resource owner password credentials) grant. Accounts with MFA or tenant
 // security defaults are rejected by Microsoft; the returned error carries the
@@ -34,7 +60,7 @@ func LoginWithPassword(email, password, clientID string) (TokenSet, error) {
 	form.Set("username", email)
 	form.Set("password", password)
 	form.Set("scope", Scope())
-	set, err := requestToken(form)
+	set, err := requestTokenAt(form, ropcTokenEndpoint())
 	set.ClientID = clientID
 	return set, err
 }

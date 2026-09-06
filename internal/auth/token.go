@@ -99,7 +99,11 @@ func RefreshWithClient(refreshToken, clientID string) (TokenSet, error) {
 }
 
 func requestToken(form url.Values) (TokenSet, error) {
-	req, err := http.NewRequest(http.MethodPost, TokenEndpoint(), strings.NewReader(form.Encode()))
+	return requestTokenAt(form, TokenEndpoint())
+}
+
+func requestTokenAt(form url.Values, endpoint string) (TokenSet, error) {
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return TokenSet{}, err
 	}
