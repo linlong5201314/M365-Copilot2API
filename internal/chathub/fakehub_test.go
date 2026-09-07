@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
 // fakeHub runs a local SignalR-style WebSocket server speaking just enough of
 // the ChatHub protocol to exercise the client end to end: handshake, chat
 // invocation frames, update events, result and completion frames.
@@ -260,8 +261,8 @@ func TestChatDisengagedEmptyTurnIsStructuredError(t *testing.T) {
 
 func TestStopFrameSentOnCancel(t *testing.T) {
 	type recorded struct {
-		mu   sync.Mutex
-		set  []string
+		mu  sync.Mutex
+		set []string
 	}
 	got := &recorded{}
 	hub := newFakeHub(t, func(conn *websocket.Conn) {

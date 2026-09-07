@@ -43,6 +43,7 @@ func openDebugStore() *debugStore {
 	}
 	return &debugStore{path: p}
 }
+
 var sensitiveKeys = map[string]bool{
 	"api_key": true, "apikey": true, "apiKey": true, "authorization": true,
 	"access_token": true, "accessToken": true, "refresh_token": true, "refreshToken": true,
@@ -180,6 +181,10 @@ func (c *captureWriter) Flush() {
 	if f, ok := c.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func (c *captureWriter) Unwrap() http.ResponseWriter {
+	return c.ResponseWriter
 }
 func (c *captureWriter) Header() http.Header { return c.ResponseWriter.Header() }
 func (c *captureWriter) Write(b []byte) (int, error) {

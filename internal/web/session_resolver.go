@@ -26,6 +26,7 @@ type sessionBinding struct {
 	CreatedAt      time.Time `json:"createdAt"`
 	LastUsedAt     time.Time `json:"lastUsedAt"`
 	IPFingerprint  string    `json:"ipFingerprint,omitempty"`
+	TenantKey      string    `json:"tenantKey,omitempty"`
 	UserField      string    `json:"userField,omitempty"`
 	// ContextHistory 持久化保存最近一次协议请求的完整消息，供重启后继续做
 	// 内容前缀匹配，避免进程重启导致所有会话键全部失效。
@@ -395,38 +396,35 @@ func (sr *sessionResolver) Bind(sessionID, conversationID, accountID string, bod
 	if explicitID != "" && sessionID == "" {
 		sessionID = explicitID
 	}
+	update := func(sess sessionBinding) {
+		sess.ConversationID = conversationID
+		sess.AccountID = accountID
+		sess.LastUsedAt = now
+		sess.UserField = body.User
+		sess.IPFingerprint = clientIPFingerprint(r)
+		sess.ContextHistory = cloneMessages(body.Messages)
+		sr.reindexLocked(sess)
+		sr.persist.markDirty()
+	}
 	// 同一云端对话只保留一条记录：内容键命中后增量轮次更新已存在会话，
 	// 而不是每次 Bind 都新建一条，避免 sessions.json 膨胀。
 	if sessionID != "" {
 		if sess, ok := sr.sessions[sessionID]; ok {
-			sess.ConversationID = conversationID
-			sess.AccountID = accountID
-			sess.LastUsedAt = now
-			sess.UserField = body.User
-			sess.IPFingerprint = clientIPFingerprint(r)
-			sess.ContextHistory = cloneMessages(body.Messages)
-			sr.reindexLocked(sess)
-			sr.persist.markDirty()
+			update(sess)
 			return
 		}
 	}
 	if sessionID == "" {
 		for _, sess := range sr.sessions {
 			if sess.ConversationID == conversationID {
-				sess.LastUsedAt = now
-				sess.AccountID = accountID
-				sess.UserField = body.User
-				sess.IPFingerprint = clientIPFingerprint(r)
-				sess.ContextHistory = cloneMessages(body.Messages)
-				sr.reindexLocked(sess)
-				sr.persist.markDirty()
+				update(sess)
 				return
 			}
 		}
 		sessionID = uuid.NewString()
 	}
 
-	sess := sessionBinding{
+	sr.reindexLocked(sessionBinding{
 		SessionID:      sessionID,
 		ConversationID: conversationID,
 		AccountID:      accountID,
@@ -435,9 +433,7 @@ func (sr *sessionResolver) Bind(sessionID, conversationID, accountID string, bod
 		IPFingerprint:  clientIPFingerprint(r),
 		UserField:      body.User,
 		ContextHistory: cloneMessages(body.Messages),
-	}
-
-	sr.reindexLocked(sess)
+	})
 	sr.persist.markDirty()
 }
 

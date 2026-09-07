@@ -9,8 +9,12 @@ import urllib.request
 import urllib.error
 import http.cookiejar
 
-TEST_DIR = r"D:\m365-e2e-test"
-SERVER_EXE = os.path.join(TEST_DIR, "m365-copilot2api.exe")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+TEST_DIR = os.environ.get("M365_E2E_DIR", os.path.join(REPO_ROOT, ".e2e-work"))
+if os.name == "nt":
+    SERVER_EXE = os.path.join(TEST_DIR, "m365-copilot2api.exe")
+else:
+    SERVER_EXE = os.path.join(TEST_DIR, "m365-copilot2api")
 DATA_DIR = os.path.join(TEST_DIR, "data")
 SECRETS_DIR = os.path.join(TEST_DIR, "secrets")
 LOG_FILE = os.path.join(TEST_DIR, "e2e.log")
@@ -61,8 +65,8 @@ def main():
     log("\n--- Step 1: Prepare clean environment ---")
     if os.path.exists(TEST_DIR):
         import shutil
-        # Kill any existing server
-        subprocess.run("taskkill /F /IM m365-copilot2api.exe 2>$null", shell=True)
+        if os.name == "nt":
+            subprocess.run("taskkill /F /IM m365-copilot2api.exe 2>nul", shell=True)
         time.sleep(1)
         def on_rm_error(func, path, exc_info):
             import stat
@@ -75,20 +79,19 @@ def main():
 
     # Copy source files
     import shutil
-    shutil.copytree(r"D:\M365-Copilot2API\cmd", os.path.join(TEST_DIR, "cmd"))
-    shutil.copytree(r"D:\M365-Copilot2API\internal", os.path.join(TEST_DIR, "internal"))
-    if os.path.exists(r"D:\M365-Copilot2API\web"):
-        shutil.copytree(r"D:\M365-Copilot2API\web", os.path.join(TEST_DIR, "web"))
-    shutil.copy(r"D:\M365-Copilot2API\go.mod", TEST_DIR)
-    shutil.copy(r"D:\M365-Copilot2API\go.sum", TEST_DIR)
+    shutil.copytree(os.path.join(REPO_ROOT, "cmd"), os.path.join(TEST_DIR, "cmd"))
+    shutil.copytree(os.path.join(REPO_ROOT, "internal"), os.path.join(TEST_DIR, "internal"))
+    if os.path.exists(os.path.join(REPO_ROOT, "web")):
+        shutil.copytree(os.path.join(REPO_ROOT, "web"), os.path.join(TEST_DIR, "web"))
+    shutil.copy(os.path.join(REPO_ROOT, "go.mod"), TEST_DIR)
+    shutil.copy(os.path.join(REPO_ROOT, "go.sum"), TEST_DIR)
     log(f"Copied source files to {TEST_DIR}")
 
     # Step 2: Build
     log("\n--- Step 2: Build ---")
     env = os.environ.copy()
-    env["PATH"] = r"D:\go\bin;" + env.get("PATH", "")
     result = subprocess.run(
-        [r"D:\go\bin\go.exe", "build", "-o", SERVER_EXE, "./cmd/server"],
+        ["go", "build", "-o", SERVER_EXE, "./cmd/server"],
         cwd=TEST_DIR, env=env, capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -107,7 +110,6 @@ def main():
         "M365_SESSION_CACHE": os.path.join(DATA_DIR, "sessions.json"),
         "M365_API_KEYS": os.path.join(DATA_DIR, "api-keys.json"),
         "M365_ADMIN_PASSWORD": "test123",
-        "PATH": r"D:\go\bin;" + env.get("PATH", ""),
     })
 
     log_file = open(os.path.join(TEST_DIR, "server.log"), 'w')

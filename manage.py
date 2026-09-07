@@ -38,7 +38,7 @@ def start():
     env = os.environ.copy()
     admin_pw = env.get("M365_ADMIN_PASSWORD", "admin123")
     env.update({
-        "M365_LISTEN": "0.0.0.0:4141",
+        "M365_LISTEN": env.get("M365_LISTEN", "0.0.0.0:4141"),
         "M365_DATA_DIR": os.path.join(DATA_DIR, ""),
         "M365_CONFIG": os.path.join(DATA_DIR, "accounts.json"),
         "M365_TOKEN_CACHE": os.path.join(DATA_DIR, "token-cache.json"),

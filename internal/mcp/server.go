@@ -1,3 +1,6 @@
+// Package mcp is an experimental MCP (SSE / JSON-RPC) tool gateway.
+// It is not mounted on the HTTP server in this release; ChatHub can still
+// attach a remote MCP plugin URL via Request.MCPServerURL.
 package mcp
 
 import (
@@ -67,12 +70,12 @@ type sessionRegistry struct {
 }
 
 type session struct {
-	id       string
+	id         string
 	providerMu sync.RWMutex
-	provider ToolProvider
-	created  time.Time
-	msgCh    chan json.RawMessage
-	done     chan struct{}
+	provider   ToolProvider
+	created    time.Time
+	msgCh      chan json.RawMessage
+	done       chan struct{}
 }
 
 // RegisterSession creates a new MCP session with the given tool provider and returns the session ID.

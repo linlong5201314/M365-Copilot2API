@@ -46,6 +46,7 @@ func compactToolResult(s string, limit int) string {
 	}
 	return s[:head] + fmt.Sprintf("\n... [truncated %d bytes] ...\n", len(s)-head-tail) + s[len(s)-tail:]
 }
+
 // scopedCallID returns a globally unique tool call id. The scope parameters
 // are kept for signature compatibility with callers that pass per-turn
 // context; the id itself must not depend on call content or scope text,

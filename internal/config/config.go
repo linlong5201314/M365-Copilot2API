@@ -1,3 +1,5 @@
+// Package config is a leftover accounts.json helper.
+// The live token store is internal/auth.Store; do not add new callers here.
 package config
 
 import (

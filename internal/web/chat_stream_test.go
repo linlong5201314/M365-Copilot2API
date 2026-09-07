@@ -15,13 +15,13 @@ type recordedDelta struct {
 }
 
 type recordedChunk struct {
-	ID      string          `json:"id"`
-	Object  string          `json:"object"`
-	Model   string          `json:"model"`
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Model   string `json:"model"`
 	Choices []struct {
-		Index        int            `json:"index"`
-		Delta        recordedDelta  `json:"delta"`
-		FinishReason *string        `json:"finish_reason"`
+		Index        int           `json:"index"`
+		Delta        recordedDelta `json:"delta"`
+		FinishReason *string       `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int64 `json:"prompt_tokens"`

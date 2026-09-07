@@ -7,9 +7,8 @@ import (
 	"strings"
 )
 
-// validateRemoteDownloadURL blocks SSRF: only https and public routable
-// addresses are accepted, with a lookup-time recheck against private,
-// loopback, link-local and cloud metadata ranges.
+// validateRemoteDownloadURL blocks obvious SSRF: only https and public
+// routable addresses are accepted.
 func validateRemoteDownloadURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -39,13 +38,10 @@ func ipUnsafe(ip net.IP) bool {
 		return true
 	}
 	if ip4 := ip.To4(); ip4 != nil {
-		// 169.254.0.0/16 link-local is covered above on Go >= 1.17;
-		// 100.64.0.0/10 (CGNAT) is not private per IP.IsPrivate.
 		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
 			return true
 		}
 	}
-	// 169.254.169.254 cloud metadata is link-local; belt and braces.
 	if strings.HasPrefix(ip.String(), "169.254.169.254") {
 		return true
 	}

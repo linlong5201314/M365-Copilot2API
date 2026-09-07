@@ -76,6 +76,17 @@ func OpenStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if looksEncrypted(b) {
+		key, err := loadOrCreateTokenKey(path)
+		if err != nil {
+			return nil, err
+		}
+		plain, err := decryptJSON(b, key)
+		if err != nil {
+			return nil, err
+		}
+		b = plain
+	}
 	if err := json.Unmarshal(b, &s.data); err != nil {
 		return nil, err
 	}
@@ -111,11 +122,46 @@ func (s *Store) saveLocked() error {
 }
 
 func atomicWrite(path string, b []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, perm); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		info, statErr := os.Stat(path)
+		if statErr != nil || info.IsDir() {
+			return err
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			return err
+		}
+		if err := os.Rename(tmpName, path); err != nil {
+			return err
+		}
+	}
+	cleanup = false
+	return nil
 }
 
 func (s *Store) List() []AccountToken {

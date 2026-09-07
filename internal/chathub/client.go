@@ -432,13 +432,13 @@ func (c *Client) chatWithHandlersConn(ctx context.Context, acc Account, req Requ
 							if !ok {
 								continue
 							}
-					author, _ := m["author"].(string)
-						text, _ := m["text"].(string)
-						mt, _ := m["messageType"].(string)
-						if origin, ok := m["contentOrigin"].(string); ok && origin != "" {
-							lastContentOrigin = origin
-						}
-						if author == "bot" && mt == "" && text != "" {
+							author, _ := m["author"].(string)
+							text, _ := m["text"].(string)
+							mt, _ := m["messageType"].(string)
+							if origin, ok := m["contentOrigin"].(string); ok && origin != "" {
+								lastContentOrigin = origin
+							}
+							if author == "bot" && mt == "" && text != "" {
 								// ChatHub often sends the first visible text as a full snapshot,
 								// followed by cursor deltas. Emit only the unseen suffix.
 								if err := emitSnapshot(text); err != nil {
@@ -474,25 +474,25 @@ func (c *Client) chatWithHandlersConn(ctx context.Context, acc Account, req Requ
 				continue
 			}
 
-				if int(t) == 3 {
-					if errObj, ok := obj["error"].(map[string]any); ok {
-						msg, _ := errObj["message"].(string)
-						if msg == "" {
-							if b, merr := json.Marshal(errObj); merr == nil {
-								msg = string(b)
-							}
+			if int(t) == 3 {
+				if errObj, ok := obj["error"].(map[string]any); ok {
+					msg, _ := errObj["message"].(string)
+					if msg == "" {
+						if b, merr := json.Marshal(errObj); merr == nil {
+							msg = string(b)
 						}
-						if throttleSignal(msg) {
-							return Result{}, &ThrottleError{Value: msg}
-						}
-						return Result{}, fmt.Errorf("chathub completion error: %v", errObj)
 					}
-					// A disengaged turn with no streamed text and no final
-					// message carries nothing usable; surface it as a
-					// structured failure rather than an empty success.
-					if disengagedSeen && streamed.Len() == 0 && strings.TrimSpace(final) == "" {
-						return Result{}, &DisengagedError{Message: "no content produced"}
+					if throttleSignal(msg) {
+						return Result{}, &ThrottleError{Value: msg}
 					}
+					return Result{}, fmt.Errorf("chathub completion error: %v", errObj)
+				}
+				// A disengaged turn with no streamed text and no final
+				// message carries nothing usable; surface it as a
+				// structured failure rather than an empty success.
+				if disengagedSeen && streamed.Len() == 0 && strings.TrimSpace(final) == "" {
+					return Result{}, &DisengagedError{Message: "no content produced"}
+				}
 				// end of stream
 				log.Printf("chathub timing completion_frame_ms=%d streamed_text=%d events=%d", time.Since(payloadSentAt).Milliseconds(), streamed.Len(), len(events))
 				text := final
